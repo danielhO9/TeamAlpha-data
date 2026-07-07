@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# 환경변수 / 비밀 - 절대 커밋 금지
+.env
+
+# 로컬 bronze 테스트 출력 (parquet)
+data/
+
+# OpenDartReader corpCode 캐시 (재생성 가능)
+docs_cache/
+
+# OS
+.DS_Store
