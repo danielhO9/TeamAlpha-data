@@ -13,8 +13,8 @@ GitHub FinanceData/marcap: 1995~현재 **일별 전종목**(KOSPI/KOSDAQ/KONEX) 
 
 재개: 이미 있는 날짜는 스킵. 중단 후 같은 명령 재실행하면 이어서 진행.
 사용:
-  uv run python -m bronze.stock --from 2015 --to 2026
-  uv run python -m bronze.stock --from 2015 --to 2026 --dest s3
+  uv run python -m pipeline.bronze.stock_marcap --from 2015 --to 2026
+  uv run python -m pipeline.bronze.stock_marcap --from 2015 --to 2026 --dest s3
 """
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ import time
 import pandas as pd
 import requests
 
-from bronze.common import base_uri
-from bronze.sink import exists, write_parquet
+from pipeline.common.paths import base_uri
+from pipeline.common.sink import exists, write_parquet
 
 RAW_URL = "https://raw.githubusercontent.com/FinanceData/marcap/master/data/marcap-{year}.parquet"
 
@@ -47,7 +47,7 @@ def _load_year(year: int, tries: int = 4) -> pd.DataFrame:
 
 def run(fromyear: int, toyear: int, dest: str) -> None:
     base = base_uri(dest)
-    print(f"[stock] {fromyear}~{toyear} → {base}/stock/marcap/date=.../all.parquet, dest={dest}")
+    print(f"[stock_marcap] {fromyear}~{toyear} → {base}/stock/marcap/date=.../all.parquet, dest={dest}")
 
     saved = skipped = 0
     for year in range(fromyear, toyear + 1):
@@ -69,7 +69,7 @@ def run(fromyear: int, toyear: int, dest: str) -> None:
             yr_saved += 1
         print(f"  ✓ {year}: {df['Date'].nunique()}거래일 (저장 {yr_saved}, 누적 저장 {saved}, 스킵 {skipped})")
 
-    print(f"[stock] 완료: 저장 {saved}일 / 스킵 {skipped}일")
+    print(f"[stock_marcap] 완료: 저장 {saved}일 / 스킵 {skipped}일")
 
 
 def parse_args() -> argparse.Namespace:

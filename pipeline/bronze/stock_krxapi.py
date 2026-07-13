@@ -1,23 +1,23 @@
-"""KRX OpenAPI 지수 일별시세 → bronze (전 지수, 무수정).
+"""KRX OpenAPI 개별종목 일별매매정보 → bronze 시세 (일별 증분용, 무수정).
 
-data-dbg.krx.co.kr/svc/apis/idx/{svc} : 한 날짜(basDd)의 그 시리즈 전 지수 시세.
-응답(OutBlock_1) 전체를 수정 없이 저장(bronze 원칙). 3개 시리즈를 각각 받는다:
-  krx_dd_trd(KRX시리즈) · kospi_dd_trd(KOSPI시리즈, 코스피200 포함) · kosdaq_dd_trd(KOSDAQ시리즈, 코스닥150 포함)
+data-dbg.krx.co.kr/svc/apis/sto/{svc} : 한 날짜(basDd)의 그 시장 전 종목 시세.
+응답(OutBlock_1) 전체를 수정 없이 저장. 시장별로 각각:
+  stk_bydd_trd(유가증권=KOSPI) · ksq_bydd_trd(코스닥)
 
-한 호출 = 그 날짜 해당 시리즈 전 지수(코스피 48·코스닥 38개 등) → marcap 과 같은 "날짜→전체" 형태.
-저장(값 무수정, 파티션만 날짜×시리즈로 분할) — 컨벤션: <데이터종류>/<소스>/date=:
-  <base>/index/krxapi/date=YYYY-MM-DD/<series>.parquet   (series ∈ krx|kospi|kosdaq)
+한 호출 = 그 날짜 해당 시장 전 종목 → marcap(백필)과 같은 "날짜→전종목" 형태, 공식·일별.
+저장(값 무수정, 컨벤션 <종류>/<소스>/date=):
+  <base>/stock/krxapi/date=YYYY-MM-DD/<market>.parquet   (market ∈ kospi|kosdaq)
 
-응답 필드(무수정 그대로): BAS_DD, IDX_CLSS, IDX_NM, CLSPRC_IDX, CMPPREVDD_IDX, FLUC_RT,
-  OPNPRC_IDX, HGPRC_IDX, LWPRC_IDX, ACC_TRDVOL, ACC_TRDVAL, MKTCAP
+응답 필드(무수정): BAS_DD, ISU_CD, ISU_NM, MKT_NM, SECT_TP_NM, TDD_CLSPRC, CMPPREVDD_PRC,
+  FLUC_RT, TDD_OPNPRC, TDD_HGPRC, TDD_LWPRC, ACC_TRDVOL, ACC_TRDVAL, MKTCAP, LIST_SHRS
 
 인증: 헤더 AUTH_KEY (.env 의 KRX_API_KEY). 데이터 2010-01-04~, 하루 10,000콜 제한.
-재개: 이미 있는 (날짜×시리즈) 스킵. 빈 응답(휴장일)은 저장 안 함(재실행 시 재조회).
-거래일 캘린더가 없어 평일만 순회하고, 휴장일은 빈 응답이라 자연히 건너뛴다.
+재개: 이미 있는 (날짜×시장) 스킵. 빈 응답(휴장일)은 저장 안 함.
+용도: 매일 증분(오늘치). 과거 백필은 marcap(stock_marcap) 담당.
 
 사용:
-  uv run python -m bronze.index --from 20150101 --to 20260707
-  uv run python -m bronze.index --from 20150101 --to 20260707 --dest s3
+  uv run python -m pipeline.bronze.stock_krxapi --from 20260710 --to 20260710
+  uv run python -m pipeline.bronze.stock_krxapi --from 20260701 --to 20260710 --dest s3
 """
 from __future__ import annotations
 
@@ -29,12 +29,12 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 
-from bronze.common import base_uri, ymd_to_dash
-from bronze.sink import exists, write_parquet
+from pipeline.common.paths import base_uri, ymd_to_dash
+from pipeline.common.sink import exists, write_parquet
 
-BASE_URL = "http://data-dbg.krx.co.kr/svc/apis/idx"
-# 저장용 시리즈명 -> KRX 서비스명
-SERIES = {"krx": "krx_dd_trd", "kospi": "kospi_dd_trd", "kosdaq": "kosdaq_dd_trd"}
+BASE_URL = "http://data-dbg.krx.co.kr/svc/apis/sto"
+# 저장용 시장명 -> KRX 서비스명
+MARKETS = {"kospi": "stk_bydd_trd", "kosdaq": "ksq_bydd_trd"}
 CALL_GAP_SEC = 0.2
 
 
@@ -77,14 +77,14 @@ def run(fromdate: str, todate: str, dest: str) -> None:
     if not key:
         raise SystemExit("KRX_API_KEY 환경변수가 없습니다 (.env 확인)")
     base = base_uri(dest)
-    print(f"[index] {fromdate}~{todate} → {base}/index/krxapi/date=.../<series>.parquet, dest={dest}")
+    print(f"[stock_krxapi] {fromdate}~{todate} → {base}/stock/krxapi/date=.../<market>.parquet, dest={dest}")
 
     saved = skipped = empty = 0
     try:
         for i, ymd in enumerate(_weekdays(fromdate, todate), 1):
             ds = ymd_to_dash(ymd)
-            for series, svc in SERIES.items():
-                path = f"{base}/index/krxapi/date={ds}/{series}.parquet"
+            for market, svc in MARKETS.items():
+                path = f"{base}/stock/krxapi/date={ds}/{market}.parquet"
                 if exists(path):  # 재개
                     skipped += 1
                     continue
@@ -98,11 +98,11 @@ def run(fromdate: str, todate: str, dest: str) -> None:
             if i % 60 == 0:
                 print(f"  ... {ds} (저장 {saved}, 스킵 {skipped}, 빈응답 {empty})")
     except AuthError as exc:
-        print(f"[index] 인증 실패로 중단(키 승인/활성 확인): {exc}")
-        print("[index] 승인 후 같은 명령 재실행하면 이어서 진행.")
+        print(f"[stock_krxapi] 인증 실패로 중단(키 승인/활성 확인): {exc}")
+        print("[stock_krxapi] 승인 후 같은 명령 재실행하면 이어서 진행.")
         return
 
-    print(f"[index] 완료: 저장 {saved} / 스킵 {skipped} / 빈응답 {empty}")
+    print(f"[stock_krxapi] 완료: 저장 {saved} / 스킵 {skipped} / 빈응답 {empty}")
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,0 +1,157 @@
+name: Deploy data pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy.yml"
+      - "deploy/**"
+      - "pipeline/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-data-pipeline
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-northeast-2
+  AWS_ACCOUNT_ID: "<aws-account-id>"
+  ECR_REPOSITORY: teamalpha-data
+  ECS_TASK_FAMILY: <ecs-task-definition-family>
+  CONTAINER_NAME: <ecs-task-definition-family>
+  SCHEDULE_NAME: <eventbridge-scheduler-name>
+  SCHEDULE_EXPRESSION: "cron(30 8 ? * TUE-SAT *)"
+  SCHEDULE_TIMEZONE: Asia/Seoul
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: image
+        env:
+          ECR_REGISTRY: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        run: |
+          set -euo pipefail
+
+          IMAGE_SHA="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          IMAGE_LATEST="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+          docker buildx build \
+            --platform linux/amd64 \
+            -f deploy/Dockerfile \
+            -t "${IMAGE_SHA}" \
+            -t "${IMAGE_LATEST}" \
+            --push \
+            .
+
+          echo "image_uri=${IMAGE_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Register ECS task definition
+        id: task
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          aws ecs describe-task-definition \
+            --task-definition "${ECS_TASK_FAMILY}" \
+            --query taskDefinition \
+            --output json > current-task-definition.json
+
+          jq \
+            --arg image "${IMAGE_URI}" \
+            --arg container "${CONTAINER_NAME}" \
+            '
+            {
+              family,
+              taskRoleArn,
+              executionRoleArn,
+              networkMode,
+              containerDefinitions,
+              volumes,
+              placementConstraints,
+              requiresCompatibilities,
+              cpu,
+              memory,
+              runtimePlatform,
+              ephemeralStorage,
+              ipcMode,
+              pidMode,
+              proxyConfiguration,
+              inferenceAccelerators
+            }
+            | with_entries(select(.value != null and .value != [] and .value != {}))
+            | .containerDefinitions |= map(
+                if .name == $container then
+                  .image = $image
+                  | .entryPoint = ["uv", "run", "python", "-m", "pipeline.daily_full"]
+                  | del(.command)
+                else
+                  .
+                end
+              )
+            ' current-task-definition.json > new-task-definition.json
+
+          TASK_DEFINITION_ARN="$(
+            aws ecs register-task-definition \
+              --cli-input-json file://new-task-definition.json \
+              --query 'taskDefinition.taskDefinitionArn' \
+              --output text
+          )"
+
+          echo "task_definition_arn=${TASK_DEFINITION_ARN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Update EventBridge Scheduler target
+        env:
+          TASK_DEFINITION_ARN: ${{ steps.task.outputs.task_definition_arn }}
+        run: |
+          set -euo pipefail
+
+          aws scheduler get-schedule \
+            --name "${SCHEDULE_NAME}" \
+            --query Target \
+            --output json > current-schedule-target.json
+
+          jq \
+            --arg task_definition_arn "${TASK_DEFINITION_ARN}" \
+            '.EcsParameters.TaskDefinitionArn = $task_definition_arn' \
+            current-schedule-target.json > new-schedule-target.json
+
+          aws scheduler update-schedule \
+            --name "${SCHEDULE_NAME}" \
+            --schedule-expression "${SCHEDULE_EXPRESSION}" \
+            --schedule-expression-timezone "${SCHEDULE_TIMEZONE}" \
+            --flexible-time-window '{"Mode":"OFF"}' \
+            --target file://new-schedule-target.json \
+            --state ENABLED
+
+      - name: Show deployed version
+        run: |
+          aws scheduler get-schedule \
+            --name "${SCHEDULE_NAME}" \
+            --query '{name:Name,state:State,expression:ScheduleExpression,timezone:ScheduleExpressionTimezone,taskDefinition:Target.EcsParameters.TaskDefinitionArn}' \
+            --output table

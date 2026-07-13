@@ -64,3 +64,53 @@ def write_text(text: str, dest: str) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     return dest
+
+
+def read_bytes(dest: str) -> bytes | None:
+    """dest 원문 bytes 읽기. 없으면 None."""
+    if dest.startswith("s3://"):
+        import boto3
+        from botocore.exceptions import ClientError
+
+        bucket, key = _split_s3(dest)
+        try:
+            return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return None
+            raise
+    path = Path(dest)
+    if not path.exists():
+        return None
+    return path.read_bytes()
+
+
+def write_text_if_changed(text: str, dest: str) -> bool:
+    """텍스트가 기존 객체와 다를 때만 저장. 반환=True면 새로 쓰였거나 변경됨."""
+    data = text.encode("utf-8")
+    if read_bytes(dest) == data:
+        return False
+    if dest.startswith("s3://"):
+        import boto3
+
+        bucket, key = _split_s3(dest)
+        boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=data)
+    else:
+        path = Path(dest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return True
+
+
+def write_bytes(data: bytes, dest: str) -> str:
+    """바이트 원문(예: DART corpCode.xml)을 저장 — 로컬 또는 S3."""
+    if dest.startswith("s3://"):
+        import boto3
+
+        bucket, key = _split_s3(dest)
+        boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=data)
+    else:
+        path = Path(dest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return dest
