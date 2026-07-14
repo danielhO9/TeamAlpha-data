@@ -22,11 +22,10 @@ concurrency:
 
 env:
   AWS_REGION: ap-northeast-2
-  AWS_ACCOUNT_ID: "<aws-account-id>"
-  ECR_REPOSITORY: teamalpha-data
-  ECS_TASK_FAMILY: <ecs-task-definition-family>
-  CONTAINER_NAME: <ecs-task-definition-family>
-  SCHEDULE_NAME: <eventbridge-scheduler-name>
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECS_TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+  SCHEDULE_NAME: ${{ vars.SCHEDULE_NAME }}
   SCHEDULE_EXPRESSION: "cron(30 8 ? * TUE-SAT *)"
   SCHEDULE_TIMEZONE: Asia/Seoul
 
@@ -44,6 +43,33 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Configure deployment environment
+        run: |
+          set -euo pipefail
+
+          DEFAULT_REPOSITORY="$(
+            basename "${GITHUB_REPOSITORY}" \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+          AWS_ACCOUNT_ID="$(
+            aws sts get-caller-identity \
+              --query Account \
+              --output text
+          )"
+
+          ECR_REPOSITORY="${ECR_REPOSITORY:-${DEFAULT_REPOSITORY}}"
+          ECS_TASK_FAMILY="${ECS_TASK_FAMILY:-${DEFAULT_REPOSITORY}-daily-full}"
+          CONTAINER_NAME="${CONTAINER_NAME:-${ECS_TASK_FAMILY}}"
+          SCHEDULE_NAME="${SCHEDULE_NAME:-${ECS_TASK_FAMILY}-tue-sat-0830-kst}"
+
+          {
+            echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}"
+            echo "ECR_REPOSITORY=${ECR_REPOSITORY}"
+            echo "ECS_TASK_FAMILY=${ECS_TASK_FAMILY}"
+            echo "CONTAINER_NAME=${CONTAINER_NAME}"
+            echo "SCHEDULE_NAME=${SCHEDULE_NAME}"
+          } >> "${GITHUB_ENV}"
+
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -52,11 +78,10 @@ jobs:
 
       - name: Build and push image
         id: image
-        env:
-          ECR_REGISTRY: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
         run: |
           set -euo pipefail
 
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           IMAGE_SHA="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
           IMAGE_LATEST="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
 

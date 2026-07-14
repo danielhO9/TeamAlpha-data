@@ -84,19 +84,19 @@ EventBridge Scheduler
   -> SNS 이메일 알림
 ```
 
-핵심 리소스:
+핵심 리소스 종류:
 
-| 구분 | 리소스 |
+| 구분 | 설명 |
 |---|---|
 | 리전 | `ap-northeast-2` |
-| S3 bronze bucket | `<bronze-bucket>` |
-| ECR repository | `<aws-account-id>.dkr.ecr.<region>.amazonaws.com/<ecr-repository>` |
-| ECS cluster | `<ecs-cluster>` |
-| ECS task definition | `<ecs-task-definition-family>` |
-| Scheduler | `<eventbridge-scheduler-name>` |
+| S3 bronze bucket | 원천 데이터를 저장하는 S3 bucket |
+| ECR repository | ECS에서 실행할 Docker 이미지를 저장하는 repository |
+| ECS cluster | daily batch task를 실행하는 Fargate cluster |
+| ECS task definition | 파이프라인 컨테이너, role, secret 주입 설정 |
+| Scheduler | daily ECS task를 시작하는 EventBridge Scheduler |
 | Scheduler 시간 | `cron(30 8 ? * TUE-SAT *)`, `Asia/Seoul` |
-| RDS | `<rds-instance>`, database `<database>` |
-| SNS topic | `<sns-topic>` |
+| RDS PostgreSQL | silver 테이블을 저장하는 private database |
+| SNS topic | daily task 결과 이메일 알림 |
 
 운영 task에는 AWS Secrets Manager 값이 환경변수로 주입됩니다.
 
@@ -229,7 +229,7 @@ KRX_API_KEY=...
 DART_API_KEY=...
 AWS_PROFILE=<aws-profile>
 S3_BRONZE_BUCKET=<bronze-bucket>
-SILVER_DB_URL=postgresql://...
+SILVER_DB_URL=postgresql://<user>:<password>@<rds-endpoint>:5432/<database>
 ```
 
 AWS CLI 로그인:
@@ -271,13 +271,18 @@ uv run python -m pipeline.silver.load --mode incremental --date 20260713
 GitHub Actions를 쓰지 못할 때 수동 이미지 배포:
 
 ```bash
+AWS_ACCOUNT_ID=<aws-account-id>
+AWS_REGION=ap-northeast-2
+ECR_REPOSITORY=<ecr-repository>
+
 AWS_PROFILE=<aws-profile> aws ecr get-login-password --region ap-northeast-2 \
-  | docker login --username AWS --password-stdin <aws-account-id>.dkr.ecr.ap-northeast-2.amazonaws.com
+  | docker login --username AWS --password-stdin \
+      "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
 docker buildx build \
   --platform linux/amd64 \
   -f deploy/Dockerfile \
-  -t <aws-account-id>.dkr.ecr.<region>.amazonaws.com/<ecr-repository>:latest \
+  -t "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest" \
   --push \
   .
 ```
@@ -300,14 +305,23 @@ docker buildx build \
 AWS_DEPLOY_ROLE_ARN=arn:aws:iam::<aws-account-id>:role/<deploy-role-name>
 ```
 
+GitHub Actions는 repo 이름을 기준으로 ECR/ECS/Scheduler 이름을 추론합니다. 실제 리소스 이름이 기본 naming convention과 다르면 아래 variables로 override합니다.
+
+```text
+ECR_REPOSITORY=<ecr-repository>
+ECS_TASK_FAMILY=<ecs-task-definition-family>
+CONTAINER_NAME=<ecs-container-name>
+SCHEDULE_NAME=<eventbridge-scheduler-name>
+```
+
 ## 알림
 
 daily task 결과 알림은 다음 흐름으로 동작합니다.
 
 ```text
 ECS task STOPPED 이벤트
-  -> EventBridge rule: <eventbridge-rule-name>
-  -> SNS topic: <sns-topic>
+  -> EventBridge rule
+  -> SNS topic
   -> 이메일 구독
 ```
 
