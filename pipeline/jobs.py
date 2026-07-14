@@ -2,7 +2,7 @@
 
   backfill : bronze 전체 적재 → silver 전체 반영
              시세=marcap(전기간·전종목), 지수=KRX OpenAPI, 재무=DART
-  daily    : 오늘치 bronze 적재 → silver 증분 반영
+  daily    : 지정 날짜 bronze 적재 → silver 증분 반영
              시세·지수=KRX OpenAPI(공식·일별), 재무=DART(당해 연도 재실행=신규 공시만)
 
 ECS/Fargate 에서 `--mode daily` 를 EventBridge 로 매일 실행. silver 는 현재 로컬 bronze 읽기만 지원한다.
@@ -34,9 +34,9 @@ def run_backfill(fromyear: int, toyear: int, dest: str) -> None:
 
 
 def run_daily(day: str, dest: str) -> None:
-    """매일 증분: 오늘치 bronze → silver 증분 반영. 재개(exists)로 중복 방지."""
-    stock_krxapi.run(day, day, dest)                          # 시세 KRX OpenAPI (오늘치)
-    index.run(day, day, dest)                                  # 지수 KRX OpenAPI (오늘치)
+    """수동 증분: 지정 날짜 bronze → silver 증분 반영. 재개(exists)로 중복 방지."""
+    stock_krxapi.run(day, day, dest)                          # 시세 KRX OpenAPI (지정 날짜)
+    index.run(day, day, dest)                                  # 지수 KRX OpenAPI (지정 날짜)
     financials.run(int(day[:4]), int(day[:4]), dest, refresh_existing=True)  # 재무: 당해 연도 재조회 → 신규 공시 반영
     if dest == "local":
         load.incremental(day)                                 # silver 증분 (bronze→RDS)
