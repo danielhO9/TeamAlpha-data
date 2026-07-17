@@ -34,8 +34,12 @@ CREATE TABLE IF NOT EXISTS price_daily (
     trading_value NUMERIC(20,2),
     shares        BIGINT,              -- 상장주식수 (index는 NULL)
     market_cap    NUMERIC(24,2),       -- 시가총액. index는 구성종목 시총 합계가 들어간다(NULL 아님)
+    market        TEXT,                -- 'KOSPI' | 'KOSDAQ' | 'KONEX' (index는 NULL). 날짜별 값 — 아래 참고
     PRIMARY KEY (asset_id, source, trade_date)
 );
+-- market 은 asset 이 아니라 여기 있다: 종목이 시장을 옮기기 때문(KONEX→KOSDAQ 71건, KOSDAQ→KOSPI 16건).
+-- 종목당 하나만 저장하면 승격 전 이력이 승격 후 시장으로 잘못 분류돼 유니버스가 오염된다.
+-- 날짜별로 두면 `WHERE market IN ('KOSPI','KOSDAQ')` 이 자동으로 시점 정확(PIT)해진다.
 
 -- 4. fundamental — 재무 (long, DART). 한 행 = 종목×회계기간×공시×지표.
 CREATE TABLE IF NOT EXISTS fundamental (
