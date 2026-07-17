@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -23,8 +24,9 @@ METRIC_MAP = {
     "매출액": "revenue", "영업이익": "operating_income", "영업이익(손실)": "operating_income",
     "법인세차감전 순이익": "pretax_income", "당기순이익(손실)": "net_income", "총포괄손익": "comprehensive_income",
 }
-# reprt_code → (fiscal_period, 회계기간 종료 월, 일)
+# reprt_code → (fiscal_period, 12월 결산 기준 종료 월, 일). thstrm_dt 를 못 읽을 때만 쓰는 fallback.
 REPRT = {"11011": ("FY", 12, 31), "11013": ("Q1", 3, 31), "11012": ("Q2", 6, 30), "11014": ("Q3", 9, 30)}
+_DT_RE = re.compile(r"(\d{4})\.(\d{2})\.(\d{2})")
 COLS = ["asset_id", "source", "period_end", "fiscal_period", "fs_type",
         "filing_id", "filed", "available_date", "metric", "value"]
 
@@ -44,6 +46,23 @@ def _amount(s) -> float | None:
         return None
     try:
         return float(s)
+    except ValueError:
+        return None
+
+
+def _period_end_from_dt(dt: str | None) -> date | None:
+    """DART thstrm_dt 에서 회계기간 종료일을 뽑는다.
+
+    비12월 결산법인이 있어 bsns_year 로 결산월을 가정하면 안 된다(3월 결산이면 최대 9개월 어긋남).
+    형식은 손익계산서 '2025.04.01 ~ 2026.03.31', 재무상태표 '2026.03.31 현재' 두 가지 —
+    둘 다 마지막 날짜가 기간 종료일이다.
+    """
+    hits = _DT_RE.findall(dt or "")
+    if not hits:
+        return None
+    y, m, d = hits[-1]
+    try:
+        return date(int(y), int(m), int(d))
     except ValueError:
         return None
 
@@ -94,7 +113,7 @@ def run(conn, base: str, krx_map: dict[str, int], years: set[int] | None = None,
             val = _amount(r.get("thstrm_amount"))
             if val is None:
                 continue
-            period_end = date(int(r["bsns_year"]), mm, dd)
+            period_end = _period_end_from_dt(r.get("thstrm_dt")) or date(int(r["bsns_year"]), mm, dd)
             rcept = r.get("rcept_no", "") or ""
             filed = _filed_from_rcept(rcept)
             recs.append((aid, "DART", period_end, fp, r.get("fs_div"),

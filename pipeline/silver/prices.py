@@ -73,6 +73,56 @@ def _with_adj_close(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _rescale_history_for_events(conn, stock: pd.DataFrame, target_date: date, tol: float = 0.005) -> int:
+    """target_date 에 조정 이벤트가 있으면 그 종목의 과거 adj_close 를 소급 조정.
+
+    daily 경로는 대상일 bronze 만 내려받아 _with_adj_close 가 하루짜리 시계열을 보므로 누적계수가
+    항상 1 이 된다(= adj_close 가 close 그대로). 그래서 분할·병합이 나면 백필 구간과 스케일이
+    어긋나 시계열이 끊긴다. 전체 재계산 대신 소급 보정으로 잇는다:
+
+      adj_close(d) = close(d) × C_last/C(d) 인데 새 이벤트 계수 k 는 C_last 만 k 배 한다
+      → target_date 이전 모든 adj_close 에 k 를 곱하면 된다. (target_date 행은 close 그대로가 정답)
+
+    k 는 KRX 전일대비가 조정기준이라는 성질로 구한다: k = (close − 전일대비) / 직전거래일 close.
+    이미 반영된 경우(직전거래일 adj_close == 조정전일종가) 건너뛰어 재실행에 안전하다.
+    """
+    if stock.empty or "prev_diff" not in stock.columns:
+        return 0
+    fixed = 0
+    with conn.cursor() as cur:
+        for row in stock.itertuples(index=False):
+            aid, close, pdiff = row.asset_id, row.close, row.prev_diff
+            if pd.isna(aid) or pd.isna(close) or pd.isna(pdiff):
+                continue
+            adj_prev = float(close) - float(pdiff)  # KRX 조정전일종가
+            if adj_prev <= 0:
+                continue
+            cur.execute(
+                "SELECT close, adj_close FROM price_daily "
+                "WHERE asset_id=%s AND source='KRX' AND trade_date < %s "
+                "ORDER BY trade_date DESC LIMIT 1",
+                (int(aid), target_date),
+            )
+            got = cur.fetchone()
+            if not got or not got[0] or float(got[0]) <= 0:
+                continue
+            prev_close, prev_adj = float(got[0]), got[1]
+            k = adj_prev / prev_close
+            if abs(k - 1) <= tol:
+                continue  # 평일 — 이벤트 없음
+            if prev_adj and abs(float(prev_adj) - adj_prev) / adj_prev < tol:
+                continue  # 이미 반영됨 (재실행)
+            cur.execute(
+                "UPDATE price_daily SET adj_close = adj_close * %s "
+                "WHERE asset_id=%s AND source='KRX' AND trade_date < %s",
+                (k, int(aid), target_date),
+            )
+            print(f"[prices] 조정이벤트 asset_id={int(aid)} k={k:.4f} → 과거 adj_close {cur.rowcount}행 소급조정")
+            fixed += 1
+    conn.commit()
+    return fixed
+
+
 def _read_index(base: str) -> pd.DataFrame:
     """벤치마크 지수(코스피200·코스닥150) → 종목시세와 같은 스키마. adj_close=close."""
     frames = []
@@ -131,3 +181,9 @@ def run(conn, base: str, krx_map: dict[str, int], target_date: date | None = Non
                   update=["open", "high", "low", "close", "adj_close",
                           "volume", "trading_value", "shares", "market_cap"])
     print(f"[prices] price_daily upsert {n}행 (미매핑 {unmapped} 스킵)")
+
+    # daily 는 하루치만 보므로 분할·병합 계수를 못 잡는다 → 과거 adj_close 를 소급 보정해 시계열을 잇는다.
+    if target_date is not None and not stock.empty:
+        n_ev = _rescale_history_for_events(conn, stock.dropna(subset=["asset_id"]), target_date)
+        if n_ev:
+            print(f"[prices] 조정이벤트 {n_ev}종목 소급조정 완료")

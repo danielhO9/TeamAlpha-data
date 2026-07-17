@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS price_daily (
     volume        BIGINT,
     trading_value NUMERIC(20,2),
     shares        BIGINT,              -- 상장주식수 (index는 NULL)
-    market_cap    NUMERIC(24,2),       -- 시가총액 (index는 NULL)
+    market_cap    NUMERIC(24,2),       -- 시가총액. index는 구성종목 시총 합계가 들어간다(NULL 아님)
     PRIMARY KEY (asset_id, source, trade_date)
 );
 
