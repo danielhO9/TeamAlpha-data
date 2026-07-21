@@ -16,7 +16,11 @@ from pipeline.common import db
 from pipeline.silver.assets import BENCHMARKS
 
 COLS = ["asset_id", "source", "trade_date", "open", "high", "low", "close",
-        "adj_close", "volume", "trading_value", "shares", "market_cap"]
+        "adj_close", "volume", "trading_value", "shares", "market_cap", "market"]
+
+# marcap 은 코스닥 글로벌 세그먼트를 따로 표기하지만 krxapi 는 KOSDAQ 으로 합쳐 준다(1771+50=1821 일치).
+# 두 소스를 같은 값으로 맞춘다.
+MARKET_NORM = {"KOSDAQ GLOBAL": "KOSDAQ"}
 
 
 def _num(s):
@@ -28,7 +32,7 @@ def _read_marcap(base: str) -> pd.DataFrame:
     for f in sorted(glob.glob(f"{base}/stock/marcap/date=*/all.parquet")):
         frames.append(pd.read_parquet(f, columns=[
             "Code", "Date", "Open", "High", "Low", "Close", "Volume", "Amount",
-            "Stocks", "Marcap", "Changes"]))
+            "Stocks", "Marcap", "Changes", "Market"]))
     if not frames:
         return pd.DataFrame()
     m = pd.concat(frames, ignore_index=True)
@@ -38,6 +42,7 @@ def _read_marcap(base: str) -> pd.DataFrame:
         "open": m["Open"], "high": m["High"], "low": m["Low"], "close": m["Close"],
         "volume": m["Volume"], "trading_value": m["Amount"],
         "shares": m["Stocks"], "market_cap": m["Marcap"], "prev_diff": m["Changes"],
+        "market": m["Market"].astype(str).replace(MARKET_NORM),
     })
 
 
@@ -56,6 +61,7 @@ def _read_krxapi(base: str) -> pd.DataFrame:
         "volume": _num(k["ACC_TRDVOL"]), "trading_value": _num(k["ACC_TRDVAL"]),
         "shares": _num(k["LIST_SHRS"]), "market_cap": _num(k["MKTCAP"]),
         "prev_diff": _num(k["CMPPREVDD_PRC"]),
+        "market": k["MKT_NM"].astype(str).replace(MARKET_NORM),
     })
 
 
@@ -141,6 +147,7 @@ def _read_index(base: str) -> pd.DataFrame:
         "low": _num(x["LWPRC_IDX"]), "close": close, "adj_close": close,
         "volume": _num(x["ACC_TRDVOL"]), "trading_value": _num(x["ACC_TRDVAL"]),
         "shares": np.nan, "market_cap": _num(x["MKTCAP"]),
+        "market": None,  # 지수는 어느 시장에 '상장'된 게 아니라 NULL
     })
 
 
@@ -154,7 +161,7 @@ def run(conn, base: str, krx_map: dict[str, int], target_date: date | None = Non
     else:
         stock = pd.DataFrame(columns=[
             "ticker", "trade_date", "open", "high", "low", "close", "adj_close",
-            "volume", "trading_value", "shares", "market_cap",
+            "volume", "trading_value", "shares", "market_cap", "market",
         ])
     stock["asset_id"] = stock["ticker"].map(krx_map)
     # 지수
@@ -179,7 +186,7 @@ def run(conn, base: str, krx_map: dict[str, int], target_date: date | None = Non
     n = db.upsert(conn, "price_daily", COLS, rows,
                   conflict=["asset_id", "source", "trade_date"],
                   update=["open", "high", "low", "close", "adj_close",
-                          "volume", "trading_value", "shares", "market_cap"])
+                          "volume", "trading_value", "shares", "market_cap", "market"])
     print(f"[prices] price_daily upsert {n}행 (미매핑 {unmapped} 스킵)")
 
     # daily 는 하루치만 보므로 분할·병합 계수를 못 잡는다 → 과거 adj_close 를 소급 보정해 시계열을 잇는다.
