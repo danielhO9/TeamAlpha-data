@@ -45,9 +45,11 @@ erDiagram
 | `trading_value` | `NUMERIC(20,2)` | 거래대금 |
 | `shares` | `BIGINT` | 상장주식수 (index는 NULL) |
 | `market_cap` | `NUMERIC(24,2)` | 시가총액. index는 구성종목 시총 합계 (NULL 아님) |
+| `market` | `TEXT` | 날짜별 시장 구분. `KOSPI` \| `KOSDAQ` \| `KONEX` (index는 NULL) |
 
 - PK `(asset_id, source, trade_date)`
 - **지수**는 `asset_type='index'`로 여기 저장 — `adj_close=close`, `shares`는 NULL. `market_cap`은 구성종목 시총 합계가 들어간다.
+- **`market`은 날짜별 속성**이다. 종목은 KONEX→KOSDAQ, KOSDAQ→KOSPI처럼 시장을 옮길 수 있으므로 `asset`에 하나만 저장하지 않는다. `price_daily.market`을 기준으로 `WHERE market IN ('KOSPI', 'KOSDAQ')`처럼 필터링하면 시점 정확한 유니버스를 만들 수 있다.
 - **`adj_close` 산출**: bronze는 **raw 체결가(무수정)**. 수정종가는 두 종류로 나뉜다.
   - **가격 수정(분할·무상·유상증자)** — **추가 소스 불필요.** KRX 등락률·전일대비가 조정기준으로 계산되므로 역산 가능: 일별 `조정전일종가 = close − 전일대비`(marcap `Changes` / krxapi `CMPPREVDD_PRC`), `일일계수 = 이전 close / 조정전일종가`(평일≈1, 이벤트일=조정비율) → 뒤에서부터 누적곱 → `adj_close`. (검증: 삼성 2018 50:1 분할계수 50.0 정확 재현.)
   - **총수익 수정(+배당)** — **배당 소스 필요**(배당금·배당락일; KRX 배당정보 or DART). bronze엔 없음. → 현재 `adj_close`는 **가격 수정**까지만. 배당 반영은 소스 추가 후.
