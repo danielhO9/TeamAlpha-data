@@ -179,7 +179,7 @@ def run(conn, base: str, krx_map: dict[str, int], target_date: date | None = Non
     both["asset_id"] = both["asset_id"].astype("int64")
     both["source"] = "KRX"
     for c in ("volume", "shares"):  # BIGINT — float 표현 방지 (nullable int)
-        both[c] = both[c].round().astype("Int64")
+        both[c] = pd.to_numeric(both[c], errors="coerce").round().astype("Int64")
     both = both.drop_duplicates(["asset_id", "source", "trade_date"], keep="last")
 
     rows = list(both[COLS].astype(object).where(pd.notna(both[COLS]), None).itertuples(index=False, name=None))
