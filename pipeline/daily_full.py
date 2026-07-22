@@ -16,6 +16,7 @@ from pipeline.silver import load
 
 
 KST = ZoneInfo("Asia/Seoul")
+EXPECTED_STOCK_FILES = {"kospi.parquet", "kosdaq.parquet"}
 
 
 def _target_day() -> str:
@@ -68,6 +69,19 @@ def _download_keys(bucket: str, keys: list[str], root: Path) -> list[str]:
     return paths
 
 
+def _assert_complete_daily_market(stock_keys: list[str], index_keys: list[str], ds: str) -> None:
+    """Prevent partial trading-day loads from deleting/replacing silver rows."""
+    stock_files = {Path(key).name for key in stock_keys}
+    if not index_keys and not stock_files:
+        return
+    missing = EXPECTED_STOCK_FILES - stock_files
+    if missing:
+        raise RuntimeError(
+            f"incomplete stock bronze for {ds}: missing {sorted(missing)} "
+            f"(stock={sorted(stock_files)}, index_files={len(index_keys)})"
+        )
+
+
 def main() -> None:
     bucket = os.environ["S3_BRONZE_BUCKET"]
     day = _target_day()
@@ -81,9 +95,13 @@ def main() -> None:
     changed_financial_keys = [_key_from_s3_uri(uri) for uri in changed_financial_uris]
     print(f"[daily] changed financial files={len(changed_financial_keys)}", flush=True)
 
+    stock_keys = _list_prefix(bucket, f"stock/krxapi/date={ds}/")
+    index_keys = _list_prefix(bucket, f"index/krxapi/date={ds}/")
+    _assert_complete_daily_market(stock_keys, index_keys, ds)
+
     keys = ["financials/dart/corpCode.xml"]
-    keys += _list_prefix(bucket, f"stock/krxapi/date={ds}/")
-    keys += _list_prefix(bucket, f"index/krxapi/date={ds}/")
+    keys += stock_keys
+    keys += index_keys
     keys += changed_financial_keys
 
     local_paths = _download_keys(bucket, keys, root)
