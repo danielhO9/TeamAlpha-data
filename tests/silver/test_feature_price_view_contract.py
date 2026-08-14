@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from pipeline.silver.return_contract import CONTRACT_RELEASE
@@ -14,6 +15,21 @@ def test_feature_view_excludes_ex_post_total_return_columns():
     assert "adj_close" in view
     assert "total_return_close" not in view
     assert "total_return_quality_run_id" not in view
+
+
+def test_manifest_gold_sql_uses_only_feature_price_view():
+    manifest = json.loads(
+        (ROOT / "pipeline/gold/factors/manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(manifest) == 7
+    for spec in manifest.values():
+        sql = (ROOT / spec["sql"]).read_text(encoding="utf-8")
+        assert spec["feature_price_field"] == "adj_close"
+        assert "public.factor_price_feature_daily" in sql
+        assert "public.price_daily" not in sql
+        assert "total_return_close" not in sql
 
 
 def test_migration_preserves_a_new_final_release_on_reapply():

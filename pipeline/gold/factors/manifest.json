@@ -1,0 +1,51 @@
+{
+  "amihud_illiquidity_1m": {
+    "predicted_sign": 1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "72bd57d66a5cb84d",
+    "sql": "pipeline/gold/factors/amihud_illiquidity_1m.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  },
+  "max_daily_return_1m": {
+    "predicted_sign": -1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "e29c3da27f06a3ba",
+    "sql": "pipeline/gold/factors/max_daily_return_1m.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  },
+  "net_equity_issuance_price_adjusted_12m": {
+    "predicted_sign": -1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "01ee73e28cd8f170",
+    "sql": "pipeline/gold/factors/net_equity_issuance_price_adjusted_12m.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  },
+  "operating_income_to_liabilities": {
+    "predicted_sign": 1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "5ff8c69343b28a3f",
+    "sql": "pipeline/gold/factors/operating_income_to_liabilities.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  },
+  "paid_in_capital_ratio": {
+    "predicted_sign": -1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "8c82db0117290bcd",
+    "sql": "pipeline/gold/factors/paid_in_capital_ratio.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  },
+  "realized_volatility_252d": {
+    "predicted_sign": -1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "e0668fb0e7c0eb69",
+    "sql": "pipeline/gold/factors/realized_volatility_252d.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  },
+  "trading_turnover_20d": {
+    "predicted_sign": -1,
+    "feature_price_field": "adj_close",
+    "research_definition_hash": "c03efb8638407bd6",
+    "sql": "pipeline/gold/factors/trading_turnover_20d.sql",
+    "value_contract": "raw_value_direction_adjusted_rank_v1"
+  }
+}
