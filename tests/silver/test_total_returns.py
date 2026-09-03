@@ -316,6 +316,30 @@ def test_stored_price_factor_interval_admits_actual_038620_rounding_case():
     assert low <= krx_reference_factor <= high
 
 
+@pytest.mark.parametrize(
+    ("previous_close", "previous_adj_close", "applied_close", "applied_adj_close", "reference_factor"),
+    [
+        (7850.0, 25953.4590, 7870.0, 26186.3745, 0.993630573248),
+        (4510.0, 22164.9640, 4385.0, 21767.8315, 0.990022172949),
+    ],
+)
+def test_two_stage_rounding_interval_admits_actual_033540_cases(
+    previous_close,
+    previous_adj_close,
+    applied_close,
+    applied_adj_close,
+    reference_factor,
+):
+    low, high = stored_price_factor_interval(
+        previous_close=previous_close,
+        previous_adj_close=previous_adj_close,
+        applied_close=applied_close,
+        applied_adj_close=applied_adj_close,
+    )
+
+    assert low <= reference_factor <= high
+
+
 def test_stored_price_factor_interval_has_closed_exact_boundaries():
     low, high = stored_price_factor_interval(
         previous_close=1575.0,

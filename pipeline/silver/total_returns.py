@@ -72,16 +72,15 @@ def _same_stored_adjustment_scale(
 
 
 def _stored_scale_interval(
-    *, close: float, adjusted_close: float,
+    *, close: float, adjusted_close: float, uncertainty: float = 0.00005,
 ) -> tuple[float, float]:
     if not all(
         math.isfinite(value) and value > 0
         for value in (close, adjusted_close)
     ):
         raise RuntimeError("price scale inputs must be finite and positive")
-    half_quantum = 0.00005
-    low = (adjusted_close - half_quantum) / close
-    high = (adjusted_close + half_quantum) / close
+    low = (adjusted_close - uncertainty) / close
+    high = (adjusted_close + uncertainty) / close
     ulp = max(math.ulp(low), math.ulp(high))
     return low - ulp, high + ulp
 
@@ -95,19 +94,24 @@ def stored_price_factor_interval(
 ) -> tuple[float, float]:
     """Return every price factor compatible with four-decimal stored prices.
 
-    Silver persists ``adj_close`` at four decimal places.  Each stored value
-    therefore represents a closed half-quantum interval around the unknown
-    unrounded value.  Price factors are positive, so their extrema are the
-    previous-scale low divided by the applied-scale high and vice versa.
-    Only one float ULP is added at the computed endpoints; this is not a
-    business tolerance and cannot conceal a factor outside the rounding
-    interval.
+    Silver's historical price lineage contains two four-decimal rounding
+    stages, so each value represents a closed one-quantum interval around the
+    unknown pre-rounding value. Price factors are positive, so their extrema
+    are the previous-scale low divided by the applied-scale high and vice
+    versa. Only one float ULP is added at the computed endpoints.
     """
     previous_low, previous_high = _stored_scale_interval(
-        close=previous_close, adjusted_close=previous_adj_close,
+        close=previous_close,
+        adjusted_close=previous_adj_close,
+        # The evidence comparison crosses both the historical adjusted-price
+        # observation and Silver's later rescale/persistence rounding stage.
+        # Their two half-quantum errors add to one 0.0001 lineage quantum.
+        uncertainty=0.0001,
     )
     applied_low, applied_high = _stored_scale_interval(
-        close=applied_close, adjusted_close=applied_adj_close,
+        close=applied_close,
+        adjusted_close=applied_adj_close,
+        uncertainty=0.0001,
     )
     low = previous_low / applied_high
     high = previous_high / applied_low

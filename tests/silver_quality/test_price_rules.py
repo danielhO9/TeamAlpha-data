@@ -1041,10 +1041,37 @@ def test_small_source_adjustment_rescales_published_history():
     }])
     fixed = _rescale_history_for_events(connection, stock, DAY)
     assert fixed == 1
+    assert "ROUND(adj_close * %s, 4)" in connection._cursor.query
     factor, asset_id, target_date = connection._cursor.update_params
     assert abs(factor - 1.001) < 1e-12
     assert asset_id == 1
     assert target_date == DAY
+
+
+class _AlreadyAppliedRescaleCursor(_RescaleCursor):
+    def fetchone(self):
+        return (date(2026, 7, 7), 100.0, 100.09999999)
+
+
+class _AlreadyAppliedRescaleConnection:
+    def __init__(self):
+        self._cursor = _AlreadyAppliedRescaleCursor()
+
+    def cursor(self):
+        return self._cursor
+
+
+def test_already_applied_rescale_normalizes_legacy_extra_decimals():
+    connection = _AlreadyAppliedRescaleConnection()
+    stock = pd.DataFrame([{
+        "asset_id": 1,
+        "close": 101.0,
+        "prev_diff": 0.9,
+    }])
+
+    assert _rescale_history_for_events(connection, stock, DAY) == 0
+    assert "SET adj_close = ROUND(adj_close, 4)" in connection._cursor.query
+    assert connection._cursor.update_params == (1, DAY)
 
 
 class _LongGapRescaleCursor(_RescaleCursor):

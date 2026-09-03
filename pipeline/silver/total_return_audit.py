@@ -49,6 +49,7 @@ from pipeline.silver.return_identity import (
     krx_common_stock_identity_digest,
 )
 from pipeline.silver.return_contract import CONTRACT_RELEASE
+from pipeline.silver.total_returns import stored_price_factor_interval
 from pipeline.silver.reviewed_cash_scale_exceptions import (
     PAID_RIGHTS_COMPONENT_BODY_SHA256,
     PAID_RIGHTS_IDENTITY,
@@ -167,21 +168,6 @@ def _stored_scale_interval(
     adjusted_close = _positive_float(adjusted_close)
     low = (adjusted_close - 0.00005) / close
     high = (adjusted_close + 0.00005) / close
-    ulp = max(math.ulp(low), math.ulp(high))
-    return low - ulp, high + ulp
-
-
-def _stored_price_factor_interval(row: dict[str, object]) -> tuple[float, float]:
-    previous_low, previous_high = _stored_scale_interval(
-        close=row["previous_close"],
-        adjusted_close=row["previous_adj_close"],
-    )
-    applied_low, applied_high = _stored_scale_interval(
-        close=row["applied_close"],
-        adjusted_close=row["applied_adj_close"],
-    )
-    low = previous_low / applied_high
-    high = previous_high / applied_low
     ulp = max(math.ulp(low), math.ulp(high))
     return low - ulp, high + ulp
 
@@ -669,7 +655,12 @@ def _runtime_resolution_evidence(
                     valid = False
                 else:
                     used_parent_keys.append(identity)
-                    factor_low, factor_high = _stored_price_factor_interval(row)
+                    factor_low, factor_high = stored_price_factor_interval(
+                        previous_close=previous_close,
+                        previous_adj_close=previous_adj,
+                        applied_close=applied_close,
+                        applied_adj_close=applied_adj,
+                    )
                     reference = _positive_float(
                         row["scale_price_factor_reference"]
                     )
