@@ -51,19 +51,23 @@ def _dates(values: pd.Series) -> pd.Series:
     return pd.to_datetime(values, errors="coerce").dt.normalize()
 
 
-def _same_stored_adjustment_scale(
+def stored_adjustment_scales_may_match(
     *,
     previous_close: float,
     previous_adj_close: float,
     applied_close: float,
     applied_adj_close: float,
 ) -> bool:
-    """Compare scales within Silver's four-decimal adj_close quantization."""
+    """Compare scales within the two-stage adjusted-price lineage bound."""
     previous_low, previous_high = _stored_scale_interval(
-        close=previous_close, adjusted_close=previous_adj_close,
+        close=previous_close,
+        adjusted_close=previous_adj_close,
+        uncertainty=0.0001,
     )
     applied_low, applied_high = _stored_scale_interval(
-        close=applied_close, adjusted_close=applied_adj_close,
+        close=applied_close,
+        adjusted_close=applied_adj_close,
+        uncertainty=0.0001,
     )
     # Equal underlying scales are possible exactly when the two intervals
     # implied by NUMERIC(...,4) rounding overlap.  Only float ULP expansion is
@@ -610,7 +614,7 @@ def apply_dividends_to_prices(
         applied_adj_close = float(output.at[applied_index, "adj_close"])
         previous_scale = previous_adj_close / previous_close
         applied_scale = applied_adj_close / applied_close
-        stable_scale = _same_stored_adjustment_scale(
+        stable_scale = stored_adjustment_scales_may_match(
             previous_close=float(output.at[previous_index, "close"]),
             previous_adj_close=float(
                 output.at[previous_index, "adj_close"]

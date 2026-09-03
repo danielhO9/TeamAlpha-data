@@ -49,7 +49,10 @@ from pipeline.silver.return_identity import (
     krx_common_stock_identity_digest,
 )
 from pipeline.silver.return_contract import CONTRACT_RELEASE
-from pipeline.silver.total_returns import stored_price_factor_interval
+from pipeline.silver.total_returns import (
+    stored_adjustment_scales_may_match,
+    stored_price_factor_interval,
+)
 from pipeline.silver.reviewed_cash_scale_exceptions import (
     PAID_RIGHTS_COMPONENT_BODY_SHA256,
     PAID_RIGHTS_IDENTITY,
@@ -159,17 +162,6 @@ def _positive_float(value: object) -> float:
     if not math.isfinite(rendered) or rendered <= 0:
         raise ValueError(f"expected a finite positive value, got {value!r}")
     return rendered
-
-
-def _stored_scale_interval(
-    *, close: float, adjusted_close: float,
-) -> tuple[float, float]:
-    close = _positive_float(close)
-    adjusted_close = _positive_float(adjusted_close)
-    low = (adjusted_close - 0.00005) / close
-    high = (adjusted_close + 0.00005) / close
-    ulp = max(math.ulp(low), math.ulp(high))
-    return low - ulp, high + ulp
 
 
 def _canonical_support_groups(value: object) -> tuple[str, ...]:
@@ -600,15 +592,11 @@ def _runtime_resolution_evidence(
             previous_scale = previous_adj / previous_close
             applied_scale = applied_adj / applied_close
             observed_factor = previous_scale / applied_scale
-            previous_interval = _stored_scale_interval(
-                close=previous_close, adjusted_close=previous_adj,
-            )
-            applied_interval = _stored_scale_interval(
-                close=applied_close, adjusted_close=applied_adj,
-            )
-            interval_stable = (
-                previous_interval[0] <= applied_interval[1]
-                and applied_interval[0] <= previous_interval[1]
+            interval_stable = stored_adjustment_scales_may_match(
+                previous_close=previous_close,
+                previous_adj_close=previous_adj,
+                applied_close=applied_close,
+                applied_adj_close=applied_adj,
             )
             if (
                 _decimal(row["previous_price_scale"], _DECIMAL_12)

@@ -376,10 +376,10 @@ def test_stored_price_factor_interval_rejects_invalid_inputs(field, value):
         stored_price_factor_interval(**inputs)
 
 
-def test_two_parts_per_million_scale_jump_is_not_hidden_as_stable():
+def test_three_parts_per_million_scale_jump_is_not_hidden_as_stable():
     prices = _prices([
         ("005930", date(2026, 1, 1), 100.0, 100.0),
-        ("005930", date(2026, 1, 2), 100.0, 99.9998),
+        ("005930", date(2026, 1, 2), 100.0, 99.9997),
     ])
     dividends = pd.DataFrame([{
         "identifier": "005930",
@@ -389,6 +389,23 @@ def test_two_parts_per_million_scale_jump_is_not_hidden_as_stable():
 
     with pytest.raises(RuntimeError, match="share base is ambiguous"):
         apply_dividends_to_prices(prices, dividends)
+
+
+def test_actual_006740_two_stage_rounding_remains_stable_without_evidence():
+    prices = _prices([
+        ("006740", date(2016, 12, 27), 3085.0, 15366.1070),
+        ("006740", date(2016, 12, 28), 3020.0, 15042.3480),
+    ])
+    dividends = pd.DataFrame([{
+        "identifier": "006740",
+        "cash_amount": 45.0,
+        "resolved_ex_date": date(2016, 12, 28),
+    }])
+
+    _, events = apply_dividends_to_prices(prices, dividends)
+
+    assert events.iloc[0]["application_status"] == "applied"
+    assert events.iloc[0]["scale_change_detected"] is False
 
 
 def test_first_listing_day_cash_event_is_explicit_and_consumes_no_evidence():
