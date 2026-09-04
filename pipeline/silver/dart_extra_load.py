@@ -42,6 +42,7 @@ from pipeline.silver.dart_action_snapshot import (
 )
 from pipeline.silver.return_identity import (
     PitActionMapStats,
+    krx_common_stock_identity_digest,
     map_actions_to_pit_assets,
 )
 from pipeline.silver.return_contract import (
@@ -755,6 +756,11 @@ def run(
         raise RuntimeError("action snapshot/cash-scale manifest metadata mismatch")
     owns_connection = conn is None
     connection = conn or db.connect()
+    identity = krx_common_stock_identity_digest(
+        connection,
+        coverage_start=DEFAULT_COVERAGE_START,
+        coverage_end=verified.coverage_end,
+    )
     context = None
     results = []
 
@@ -782,6 +788,7 @@ def run(
             base,
             coverage_start=verified.coverage_start,
             coverage_end=verified.coverage_end,
+            verified_snapshot_sha256=verified.manifest_sha256,
         )
         if total_return_actions_only:
             manifest_support = _manifest_support_action_candidates(scale_evidence)
@@ -803,6 +810,8 @@ def run(
                 action_frame,
                 coverage_start=DEFAULT_COVERAGE_START,
                 include_audit=True,
+                verified_snapshot_sha256=verified.manifest_sha256,
+                asset_identity_digest=identity.digest,
             )
             action_stats = dict(action_stats)
             if (

@@ -15,6 +15,8 @@ import html
 import json
 import re
 import zipfile
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -90,6 +92,40 @@ COLUMNS = [
     "source",
     "source_file",
 ]
+
+
+# A closed daily run validates the same content-addressed snapshot once for
+# preview and once for publication. Keep the parsed frame in-process so the
+# second phase does not reopen and parse the complete historical Bronze set.
+# Callers must provide the SHA-256 of a successfully verified snapshot; direct
+# and unverified prepare() calls deliberately bypass this cache.
+_PREPARE_CACHE_MAX_ENTRIES = 2
+_PREPARE_CACHE: OrderedDict[
+    tuple[str, str, str | None, str | None, str | None],
+    tuple[pd.DataFrame, dict],
+] = OrderedDict()
+
+
+def _cached_prepare(
+    key: tuple[str, str, str | None, str | None, str | None],
+) -> tuple[pd.DataFrame, dict] | None:
+    cached = _PREPARE_CACHE.get(key)
+    if cached is None:
+        return None
+    _PREPARE_CACHE.move_to_end(key)
+    frame, stats = cached
+    return frame.copy(deep=True), deepcopy(stats)
+
+
+def _remember_prepare(
+    key: tuple[str, str, str | None, str | None, str | None],
+    frame: pd.DataFrame,
+    stats: dict,
+) -> None:
+    _PREPARE_CACHE[key] = (frame.copy(deep=True), deepcopy(stats))
+    _PREPARE_CACHE.move_to_end(key)
+    while len(_PREPARE_CACHE) > _PREPARE_CACHE_MAX_ENTRIES:
+        _PREPARE_CACHE.popitem(last=False)
 
 STRUCTURED_DATE_FIELDS = {
     "paid_increase": (),
@@ -1824,6 +1860,7 @@ def prepare(
     target_date: date | None = None,
     coverage_start: date | None = None,
     coverage_end: date | None = None,
+    verified_snapshot_sha256: str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """로컬 Bronze에서 기업행사 증거를 읽고 표준 DataFrame과 통계를 반환한다.
 
@@ -1841,6 +1878,22 @@ def prepare(
     ):
         raise ValueError("coverage_end precedes coverage_start")
     base = str(Path(base).expanduser().resolve())
+    cache_key = None
+    if verified_snapshot_sha256 is not None:
+        cache_key = (
+            base,
+            str(verified_snapshot_sha256),
+            target_date.isoformat() if target_date is not None else None,
+            coverage_start.isoformat() if coverage_start is not None else None,
+            coverage_end.isoformat() if coverage_end is not None else None,
+        )
+        cached = _cached_prepare(cache_key)
+        if cached is not None:
+            print(
+                "[corporate-actions] reused verified snapshot parse cache",
+                flush=True,
+            )
+            return cached
     evidence_context = _prepare_evidence_context(
         base,
         coverage_start=coverage_start,
@@ -1933,7 +1986,8 @@ def prepare(
 
     if not records:
         _assert_prepare_evidence_unchanged(evidence_context)
-        return _empty(), {
+        empty = _empty()
+        stats = {
             "row_count": 0,
             "structured_file_count": len(structured_files),
             "scoped_structured_file_count": scoped_structured_file_count,
@@ -1951,6 +2005,9 @@ def prepare(
             ),
             "disclosure_observation_audit": disclosure_observation_audit,
         }
+        if cache_key is not None:
+            _remember_prepare(cache_key, empty, stats)
+        return empty, stats
 
     events = pd.DataFrame(records, columns=COLUMNS)
     events["identifier"] = events["identifier"].map(normalize_krx_ticker)
@@ -1968,7 +2025,7 @@ def prepare(
         )
         events = events[relevant].reset_index(drop=True)
     _assert_prepare_evidence_unchanged(evidence_context)
-    return events, {
+    stats = {
         "row_count": len(events),
         "structured_file_count": len(structured_files),
         "scoped_structured_file_count": scoped_structured_file_count,
@@ -1991,6 +2048,9 @@ def prepare(
         ),
         "disclosure_observation_audit": disclosure_observation_audit,
     }
+    if cache_key is not None:
+        _remember_prepare(cache_key, events, stats)
+    return events, stats
 
 
 def exclude_nontradable(

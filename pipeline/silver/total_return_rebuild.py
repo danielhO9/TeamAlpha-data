@@ -1117,6 +1117,7 @@ def _prepare_local_action_snapshot(
     base: str,
     *,
     required_end: date,
+    asset_identity_digest: str | None = None,
 ) -> LocalActionSnapshot:
     """Prepare a complete local Bronze action snapshot for read-only preview."""
     verified = verify_snapshot_manifest(
@@ -1139,6 +1140,7 @@ def _prepare_local_action_snapshot(
         verified.base,
         coverage_start=verified.coverage_start,
         coverage_end=verified.coverage_end,
+        verified_snapshot_sha256=verified.manifest_sha256,
     )
     from pipeline.silver.dart_extra_load import (
         _manifest_support_action_candidates,
@@ -1169,6 +1171,8 @@ def _prepare_local_action_snapshot(
         scoped,
         coverage_start=CONTRACT_COVERAGE_START,
         include_audit=True,
+        verified_snapshot_sha256=verified.manifest_sha256,
+        asset_identity_digest=asset_identity_digest,
     )
     normalized = corporate_actions.normalize_for_publish(mapped)
     if normalized.empty or not normalized["action_type"].eq("cash_dividend").any():
@@ -2251,6 +2255,7 @@ def _rebuild(
             conn,
             actions_base,
             required_end=required_action_coverage_end,
+            asset_identity_digest=identity.digest,
         )
         if actions_base is not None
         else None

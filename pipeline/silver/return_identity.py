@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -13,6 +15,36 @@ from pipeline.silver.return_contract import normalize_krx_ticker
 
 ASSET_IDENTITY_CONTRACT = "krx_pit_ticker_asset_v3_price_scoped"
 CERTIFIED_MARKETS = ("KOSPI", "KOSDAQ")
+
+_PIT_MAP_CACHE_MAX_ENTRIES = 2
+_PIT_MAP_CACHE: OrderedDict[
+    tuple[str, str, str, bool],
+    tuple[pd.DataFrame, "PitActionMapStats", pd.DataFrame | None],
+] = OrderedDict()
+
+
+def _cached_pit_map(key):
+    cached = _PIT_MAP_CACHE.get(key)
+    if cached is None:
+        return None
+    _PIT_MAP_CACHE.move_to_end(key)
+    mapped, stats, audit = cached
+    return (
+        mapped.copy(deep=True),
+        deepcopy(stats),
+        audit.copy(deep=True) if audit is not None else None,
+    )
+
+
+def _remember_pit_map(key, mapped, stats, audit) -> None:
+    _PIT_MAP_CACHE[key] = (
+        mapped.copy(deep=True),
+        deepcopy(stats),
+        audit.copy(deep=True) if audit is not None else None,
+    )
+    _PIT_MAP_CACHE.move_to_end(key)
+    while len(_PIT_MAP_CACHE) > _PIT_MAP_CACHE_MAX_ENTRIES:
+        _PIT_MAP_CACHE.popitem(last=False)
 
 
 @dataclass(frozen=True)
@@ -158,6 +190,8 @@ def map_actions_to_pit_assets(
     *,
     coverage_start: date,
     include_audit: bool = False,
+    verified_snapshot_sha256: str | None = None,
+    asset_identity_digest: str | None = None,
 ) -> tuple[pd.DataFrame, PitActionMapStats] | tuple[
     pd.DataFrame, PitActionMapStats, pd.DataFrame
 ]:
@@ -168,8 +202,26 @@ def map_actions_to_pit_assets(
     KOSPI/KOSDAQ price range.  DART ``corp_cls`` is retained for audit counts
     but is never a market-scope gate (historical listed issuers can be ``E``).
     """
+    cache_key = None
+    if verified_snapshot_sha256 is not None and asset_identity_digest is not None:
+        cache_key = (
+            str(verified_snapshot_sha256),
+            str(asset_identity_digest),
+            coverage_start.isoformat(),
+            include_audit,
+        )
+        cached = _cached_pit_map(cache_key)
+        if cached is not None:
+            mapped, stats, audit = cached
+            print("[corporate-actions] reused verified PIT mapping cache", flush=True)
+            return (mapped, stats, audit) if include_audit else (mapped, stats)
     if frame.empty:
         result = (frame.copy(), PitActionMapStats(0, 0, 0, 0))
+        if cache_key is not None:
+            _remember_pit_map(
+                cache_key, result[0], result[1],
+                frame.copy() if include_audit else None,
+            )
         return (*result, frame.copy()) if include_audit else result
     required = {"identifier", "event_type", "announcement_date"}
     missing = required - set(frame.columns)
@@ -203,6 +255,11 @@ def map_actions_to_pit_assets(
             },
             excluded_reason_counts={"BEFORE_CONTRACT": before_count},
         ))
+        if cache_key is not None:
+            _remember_pit_map(
+                cache_key, result[0], result[1],
+                audit if include_audit else None,
+            )
         return (*result, audit) if include_audit else result
 
     all_corp_cls = scoped.get(
@@ -398,6 +455,11 @@ def map_actions_to_pit_assets(
         columns={"_event_date": "pit_event_date"}
     )
     result = (mapped, stats)
+    if cache_key is not None:
+        _remember_pit_map(
+            cache_key, mapped, stats,
+            audit.reset_index(drop=True) if include_audit else None,
+        )
     return (*result, audit.reset_index(drop=True)) if include_audit else result
 
 

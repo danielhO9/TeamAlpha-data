@@ -3,6 +3,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from pipeline.silver import return_identity
 from pipeline.silver.return_identity import map_actions_to_pit_assets
 
 
@@ -81,6 +82,42 @@ def test_pit_mapping_uses_event_date_and_excludes_preferred_scope():
     assert "ai.valid_to IS NULL OR ai.valid_to >= r.event_date" in sql
     assert params[1] == ["005930", "005935"]
     assert params[2] == [date(2020, 1, 31), date(2020, 1, 2)]
+
+
+def test_pit_mapping_reuses_only_same_verified_snapshot_and_identity():
+    return_identity._PIT_MAP_CACHE.clear()
+    first_connection = _Connection([
+        (0, 101, "common_stock", True),
+        (1, 202, "preferred_stock", True),
+    ])
+    kwargs = {
+        "coverage_start": date(2015, 1, 1),
+        "include_audit": True,
+        "verified_snapshot_sha256": "a" * 64,
+        "asset_identity_digest": "b" * 64,
+    }
+    first, first_stats, _ = map_actions_to_pit_assets(
+        first_connection, _actions(), **kwargs,
+    )
+    first.loc[:, "asset_id"] = 999
+    first_stats.included_corp_cls_counts["MUTATED"] = 1
+
+    second_connection = _Connection([])
+    second, second_stats, _ = map_actions_to_pit_assets(
+        second_connection, _actions(), **kwargs,
+    )
+
+    assert second["asset_id"].tolist() == [101]
+    assert "MUTATED" not in second_stats.included_corp_cls_counts
+    assert second_connection.cursor_instance.statements == []
+
+    map_actions_to_pit_assets(
+        second_connection,
+        _actions(),
+        **{**kwargs, "asset_identity_digest": "c" * 64},
+    )
+    assert len(second_connection.cursor_instance.statements) == 1
+    return_identity._PIT_MAP_CACHE.clear()
 
 
 def test_pit_mapping_explicitly_partitions_unmapped_event():

@@ -25,6 +25,59 @@ def test_parse_date_rejects_invalid_calendar_date():
     assert corporate_actions._parse_date("2025-02-30") is None
 
 
+def test_prepare_reuses_only_explicitly_verified_snapshot_cache(
+    monkeypatch, tmp_path,
+):
+    corporate_actions._PREPARE_CACHE.clear()
+    calls = {"context": 0}
+
+    def evidence_context(*_args, **_kwargs):
+        calls["context"] += 1
+        return object()
+
+    monkeypatch.setattr(
+        corporate_actions, "_prepare_evidence_context", evidence_context,
+    )
+    monkeypatch.setattr(
+        corporate_actions,
+        "_disclosure_rows",
+        lambda *_args, **_kwargs: ([], {"observation_count": 0}),
+    )
+    monkeypatch.setattr(
+        corporate_actions, "_verified_lineage_receipts",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(corporate_actions.glob, "glob", lambda *_args: [])
+    monkeypatch.setattr(
+        corporate_actions,
+        "_related_cash_correction_signatures",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(
+        corporate_actions, "_assert_prepare_evidence_unchanged",
+        lambda *_args, **_kwargs: None,
+    )
+
+    kwargs = {
+        "coverage_start": date(2015, 1, 1),
+        "coverage_end": date(2026, 9, 1),
+        "verified_snapshot_sha256": "a" * 64,
+    }
+    first, first_stats = corporate_actions.prepare(str(tmp_path), **kwargs)
+    first_stats["row_count"] = 99
+    second, second_stats = corporate_actions.prepare(str(tmp_path), **kwargs)
+
+    assert calls["context"] == 1
+    assert first is not second
+    assert second_stats["row_count"] == 0
+
+    corporate_actions.prepare(
+        str(tmp_path), **{**kwargs, "verified_snapshot_sha256": "b" * 64},
+    )
+    assert calls["context"] == 2
+    corporate_actions._PREPARE_CACHE.clear()
+
+
 def _write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
