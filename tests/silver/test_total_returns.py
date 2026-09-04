@@ -376,10 +376,10 @@ def test_stored_price_factor_interval_rejects_invalid_inputs(field, value):
         stored_price_factor_interval(**inputs)
 
 
-def test_three_parts_per_million_scale_jump_is_not_hidden_as_stable():
+def test_two_parts_per_million_scale_jump_is_not_hidden_as_stable():
     prices = _prices([
         ("005930", date(2026, 1, 1), 100.0, 100.0),
-        ("005930", date(2026, 1, 2), 100.0, 99.9997),
+        ("005930", date(2026, 1, 2), 100.0, 99.9998),
     ])
     dividends = pd.DataFrame([{
         "identifier": "005930",
@@ -400,6 +400,23 @@ def test_actual_006740_two_stage_rounding_remains_stable_without_evidence():
         "identifier": "006740",
         "cash_amount": 45.0,
         "resolved_ex_date": date(2016, 12, 28),
+    }])
+
+    _, events = apply_dividends_to_prices(prices, dividends)
+
+    assert events.iloc[0]["application_status"] == "applied"
+    assert events.iloc[0]["scale_change_detected"] is False
+
+
+def test_largest_scanned_lineage_drift_remains_stable_without_evidence():
+    prices = _prices([
+        ("033250", date(2019, 12, 26), 2800.0, 7008.1870),
+        ("033250", date(2019, 12, 27), 2870.0, 7183.3920),
+    ])
+    dividends = pd.DataFrame([{
+        "identifier": "033250",
+        "cash_amount": 1.0,
+        "resolved_ex_date": date(2019, 12, 27),
     }])
 
     _, events = apply_dividends_to_prices(prices, dividends)

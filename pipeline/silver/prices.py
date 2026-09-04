@@ -330,25 +330,9 @@ def _rescale_history_for_events(
                 continue  # 원천 조정계수가 정확히 1인 정상일
             already_tolerance = max(0.0002, abs(adj_prev) * 1e-7)
             if prev_adj and abs(float(prev_adj) - adj_prev) <= already_tolerance:
-                # Older daily runs multiplied a NUMERIC(28,8) value without
-                # restoring Silver's documented four-decimal adj_close
-                # quantum.  Normalize the already-applied history as part of
-                # the idempotent retry so downstream scale-evidence intervals
-                # remain exact instead of requiring an arbitrary tolerance.
-                cur.execute(
-                    "UPDATE price_daily SET adj_close = ROUND(adj_close, 4) "
-                    "WHERE asset_id=%s AND source='KRX' AND trade_date < %s "
-                    "AND adj_close IS DISTINCT FROM ROUND(adj_close, 4)",
-                    (int(aid), target_date),
-                )
-                if cur.rowcount:
-                    print(
-                        f"[prices] asset_id={int(aid)} 기존 수정종가 "
-                        f"{cur.rowcount}행 4자리 정규화"
-                    )
                 continue  # 이미 반영됨 (재실행)
             cur.execute(
-                "UPDATE price_daily SET adj_close = ROUND(adj_close * %s, 4) "
+                "UPDATE price_daily SET adj_close = adj_close * %s "
                 "WHERE asset_id=%s AND source='KRX' AND trade_date < %s",
                 (k, int(aid), target_date),
             )

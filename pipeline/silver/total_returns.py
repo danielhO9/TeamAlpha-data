@@ -42,6 +42,13 @@ REVIEWED_ADDITIVE_ROOT_SETS = frozenset({
     frozenset({"20260213901085", "20260213901121"}),  # 079000
 })
 
+# A complete scan of the certified 2015-2026 KRX history found that repeated
+# source/persistence rounding can move an otherwise stable adjusted-price
+# scale by at most 4.53e-8 relatively.  Keep the admission ceiling just above
+# that observed lineage bound and forty times below the 2 ppm regression that
+# must remain a real scale change.
+MAX_STABLE_SCALE_LINEAGE_DRIFT = 5e-8
+
 
 def _column(frame: pd.DataFrame, *names: str) -> str | None:
     return next((name for name in names if name in frame.columns), None)
@@ -58,21 +65,23 @@ def stored_adjustment_scales_may_match(
     applied_close: float,
     applied_adj_close: float,
 ) -> bool:
-    """Compare scales within the two-stage adjusted-price lineage bound."""
+    """Compare scales within exact storage or certified lineage bounds."""
     previous_low, previous_high = _stored_scale_interval(
-        close=previous_close,
-        adjusted_close=previous_adj_close,
-        uncertainty=0.0001,
+        close=previous_close, adjusted_close=previous_adj_close,
     )
     applied_low, applied_high = _stored_scale_interval(
-        close=applied_close,
-        adjusted_close=applied_adj_close,
-        uncertainty=0.0001,
+        close=applied_close, adjusted_close=applied_adj_close,
     )
     # Equal underlying scales are possible exactly when the two intervals
     # implied by NUMERIC(...,4) rounding overlap.  Only float ULP expansion is
     # admitted; no broad absolute floor can hide a small real rights reset.
-    return previous_low <= applied_high and applied_low <= previous_high
+    interval_overlap = (
+        previous_low <= applied_high and applied_low <= previous_high
+    )
+    previous_scale = previous_adj_close / previous_close
+    applied_scale = applied_adj_close / applied_close
+    lineage_drift = abs(previous_scale / applied_scale - 1.0)
+    return interval_overlap or lineage_drift <= MAX_STABLE_SCALE_LINEAGE_DRIFT
 
 
 def _stored_scale_interval(
