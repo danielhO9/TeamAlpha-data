@@ -21,6 +21,14 @@ from typing import Iterable
 _MUTABLE_LIST_FIELDS = frozenset({"corp_cls", "corp_name", "flr_nm", "rm"})
 _RECEIPT_PATTERN = re.compile(r"^[0-9]{14}$")
 _INTERVAL_PATTERN = re.compile(r"^[0-9]{8}$")
+_REPORT_STATUS_PREFIX = re.compile(r"^(?:\[정정명령부과\]\s*)+")
+
+
+def _immutable_comparison_value(field: str, value: object) -> object:
+    """Ignore only DART's retrospective correction-order display marker."""
+    if field == "report_nm" and isinstance(value, str):
+        return _REPORT_STATUS_PREFIX.sub("", value)
+    return value
 
 
 def immutable_disclosure_changes(left: dict, right: dict) -> tuple[str, ...]:
@@ -28,7 +36,11 @@ def immutable_disclosure_changes(left: dict, right: dict) -> tuple[str, ...]:
     fields = set(left) | set(right)
     return tuple(sorted(
         key for key in fields
-        if key not in _MUTABLE_LIST_FIELDS and left.get(key) != right.get(key)
+        if (
+            key not in _MUTABLE_LIST_FIELDS
+            and _immutable_comparison_value(key, left.get(key))
+            != _immutable_comparison_value(key, right.get(key))
+        )
     ))
 
 
@@ -116,7 +128,19 @@ def canonicalize_disclosures(
                 for item in observations
             }) > 1
         }
-        immutable_changes = sorted(changed - _MUTABLE_LIST_FIELDS)
+        immutable_changes = sorted(
+            key for key in changed - _MUTABLE_LIST_FIELDS
+            if len({
+                json.dumps(
+                    _immutable_comparison_value(key, item.row.get(key)),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                for item in observations
+            }) > 1
+        )
         if immutable_changes:
             raise RuntimeError(
                 "conflicting immutable DART disclosure payloads for receipt: "
@@ -174,8 +198,11 @@ def canonicalize_disclosures(
         separators=(",", ":"),
     ).encode("utf-8")
     audit: dict[str, object] = {
-        "contract": "latest_manifest_interval_mutable_list_fields_v2",
+        "contract": "latest_manifest_interval_mutable_list_fields_v3",
         "mutable_fields": sorted(_MUTABLE_LIST_FIELDS),
+        "conditional_mutable_fields": {
+            "report_nm": "leading_[정정명령부과]_display_marker_only",
+        },
         "observation_count": observation_count,
         "unique_receipt_count": len(canonical),
         "duplicate_receipt_count": duplicate_receipts,

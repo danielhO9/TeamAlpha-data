@@ -528,7 +528,7 @@ def _certified_action_snapshot_run(
     if (
         not isinstance(disclosure_observation_audit, dict)
         or disclosure_observation_audit.get("contract")
-        != "latest_manifest_interval_mutable_list_fields_v2"
+        != "latest_manifest_interval_mutable_list_fields_v3"
         or re.fullmatch(
             r"[0-9a-f]{64}",
             str(disclosure_observation_audit.get(

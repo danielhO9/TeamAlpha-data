@@ -409,7 +409,7 @@ def _safe_state():
         ),
     }
     disclosure_observation_audit = {
-        "contract": "latest_manifest_interval_mutable_list_fields_v2",
+        "contract": "latest_manifest_interval_mutable_list_fields_v3",
         "observation_count": 3,
         "unique_receipt_count": 2,
         "mutable_conflict_digest": "c" * 64,

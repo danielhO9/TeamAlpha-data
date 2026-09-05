@@ -30,6 +30,55 @@ def test_economic_identity_disclosure_changes_remain_blocked():
     assert immutable_disclosure_changes(original, changed) == ("stock_code",)
 
 
+def test_correction_order_report_marker_is_conditionally_mutable(tmp_path):
+    original = {
+        "rcept_no": "20260826000752",
+        "stock_code": "361610",
+        "report_nm": "[첨부정정]주요사항보고서(회사합병결정)",
+        "corp_cls": "Y",
+    }
+    current = {
+        **original,
+        "report_nm": (
+            "[정정명령부과][첨부정정]주요사항보고서(회사합병결정)"
+        ),
+    }
+    old_path = (
+        tmp_path / "from=20260818" / "to=20260901"
+        / "disclosures_v3.json"
+    )
+    new_path = (
+        tmp_path / "from=20260819" / "to=20260902"
+        / "disclosures_v3.json"
+    )
+
+    assert immutable_disclosure_changes(original, current) == ()
+    canonical, audit = canonicalize_disclosures([
+        (old_path, original),
+        (new_path, current),
+    ])
+
+    assert canonical["20260826000752"] == (str(new_path), current)
+    assert audit["mutable_conflict_field_counts"] == {"report_nm": 1}
+    assert audit["conditional_mutable_fields"] == {
+        "report_nm": "leading_[정정명령부과]_display_marker_only",
+    }
+
+
+def test_report_semantics_change_remains_blocked():
+    original = {
+        "rcept_no": "20260826000752",
+        "stock_code": "361610",
+        "report_nm": "[첨부정정]주요사항보고서(회사합병결정)",
+    }
+    changed = {
+        **original,
+        "report_nm": "[정정명령부과]주요사항보고서(유상증자결정)",
+    }
+
+    assert immutable_disclosure_changes(original, changed) == ("report_nm",)
+
+
 def test_latest_explicit_interval_resolves_mutable_overlap(tmp_path):
     original = {
         "rcept_no": "20260819900668",
@@ -59,7 +108,7 @@ def test_latest_explicit_interval_resolves_mutable_overlap(tmp_path):
 
     assert canonical["20260819900668"] == (str(new_path), current)
     assert audit["contract"] == (
-        "latest_manifest_interval_mutable_list_fields_v2"
+        "latest_manifest_interval_mutable_list_fields_v3"
     )
 
 
