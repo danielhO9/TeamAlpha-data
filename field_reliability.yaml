@@ -1,6 +1,6 @@
 # Machine-readable field reliability contract for the research agent / guardrails.
 # Human companion: DATA_CONTRACT.md. Keep both in sync.
-version: "2026-08-12"
+version: "2026-09-03"
 ruleset_version: "1.28.0"
 
 coverage:
@@ -10,6 +10,11 @@ coverage:
   fmp_commodity: {from: "2015-01-01", assets: 28}
   fmp_fx: {from: "2015-01-01", assets: 1, symbol: "USDKRW"}
   dart_fundamental: {from: "2015-03-31"}
+  dart_full_statement_lines: {from: "2015-01-01", availability: "after certified backfill"}
+  dart_ownership_disclosures: {availability: "after certified backfill"}
+  dart_industry_observation: {availability: "current snapshot forward; no historical effective dates"}
+  krx_investor_flow: {availability: "licensed export only"}
+  krx_short_balance: {from: "2016-06-30", availability: "licensed observed vintages only"}
   dart_dividend: {from: "2013-09-30"}
   fmp_fundamental: {from: "2015-01-02"}
 
@@ -17,10 +22,9 @@ coverage:
 not_provided:
   - free_float_shares
   - order_book
-  - short_selling
+  - historical_short_balance_vintages_before_first_authorized_observation
   - securities_lending
-  - sector_classification_pit
-  - detailed_cashflow_lines   # CFO, CAPEX, depreciation, COGS, SG&A, cash (KRX/DART)
+  - historical_sector_classification_pit_before_first_dart_observation
 
 sources:
   krx: {trust: internally_validated}
@@ -103,6 +107,45 @@ tables:
       statements: [BS, IS, CF]
       note: "US only; not internally validated"
 
+  fundamental_statement_line:
+    layout: "all numeric OpenDART BS/IS/CIS/CF/SCE lines for CFS/OFS"
+    pit_field: available_date
+    pit_note: "conservative next-day availability; always filter available_date <= as_of"
+    validated: conditional
+    safe_for: [explicit_account_id_research, accounting_feature_discovery]
+    unsafe_for: [blind_account_name_aggregation, mixing_cfs_ofs, using_current_view_for_historical_as_of]
+    note: "Source lines are retained without forced semantic mapping. A factor must freeze account_id mappings and test coverage/unit/sign semantics."
+
+  ownership_disclosure_event:
+    pit_field: available_date
+    validated: conditional
+    safe_for: [ownership_change_disclosure_features, source_audit]
+    unsafe_for: [exact_insider_trade_execution_date, exact_execution_price]
+    note: "OpenDART elestock/majorstock filing events; disclosures, not an exchange trade tape."
+
+  investor_flow_daily:
+    pit_field: available_at
+    validated: conditional
+    provenance_required: KRX_DATA_MARKETPLACE_AUTHORIZED_EXPORT
+    safe_for: [foreign_institutional_flow_features]
+    unsafe_for: [unlicensed_scraped_inputs, same_close_use_before_available_at]
+    note: "Populated only from a purchased/approved KRX export with authorization_id and source SHA-256."
+
+  industry_classification_observation:
+    pit_field: available_at
+    validated: conditional
+    safe_for: [prospective_industry_grouping, current_cross_section_grouping]
+    unsafe_for: [retroactive_historical_sector_neutralization_before_available_at]
+    note: "DART company overview current induty_code; the API does not provide a historical effective date."
+
+  short_position_balance_observation:
+    pit_field: available_at
+    validated: conditional
+    provenance_required: KRX_DATA_MARKETPLACE_AUTHORIZED_EXPORT
+    safe_for: [prospective_short_balance_features, source_audit]
+    unsafe_for: [retroactive_use_before_observed_at, interpreting_as_total_market_short_interest]
+    note: "KRX aggregates reportable short net positions and may receive later corrections; first-observed vintage is preserved."
+
   corporate_action:
     feature_pit_certified: false
     action_vintage:
@@ -172,7 +215,11 @@ factor_guidance:
   price_momentum_reversal_volatility: {use: [adj_close], avoid: [close]}
   forward_return_label: {use: [total_return_close], role: ex_post_realized_forward_return_label, feature_pit_safe: false}
   dividend_yield_growth_frequency_carry: {buildable: false, avoid: [corporate_action.cash_dividend, dividend_history], reason: "direct dividend history is not bitemporal/PIT-certified for features"}
-  value_quality_kr: {use: [fundamental.dart.bs, fundamental.dart.is, market_cap], avoid: [detailed_cashflow_lines, fmp_mixing]}
+  value_quality_kr: {use: [fundamental.dart.bs, fundamental.dart.is, fundamental_statement_line, market_cap], avoid: [unfrozen_account_name_mapping, fmp_mixing]}
+  ownership_change_kr: {use: [ownership_disclosure_event], note: "disclosure timing only; not exact trade execution"}
+  foreign_flow_kr: {use: [investor_flow_daily], note: "only after licensed-export certification"}
+  sector_neutralization_kr: {use: [industry_classification_observation], note: "only on/after the observation available_at"}
+  short_balance_kr: {use: [short_position_balance_observation], note: "reported-threshold aggregate, not complete market short interest"}
   liquidity_size: {use: [trading_value, market_cap, shares], note: "shares != free float"}
   us_factors: {use: [fmp_price, fmp_fundamental], note: "vendor-trusted"}
   float_short_orderbook_based: {buildable: false, reason: not_provided}
