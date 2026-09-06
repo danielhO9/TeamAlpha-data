@@ -88,9 +88,13 @@ def run(
     *,
     refresh_existing: bool = False,
     max_corps: int | None = None,
+    corp_codes: set[str] | None = None,
+    changed_only: bool = False,
 ) -> list[str]:
     base = base_uri(dest)
     corps = financials.ensure_corp_code_xml(base)
+    if corp_codes is not None:
+        corps = [item for item in corps if item[0] in corp_codes]
     if max_corps is not None:
         if max_corps < 1:
             raise ValueError("max_corps must be positive")
@@ -103,15 +107,18 @@ def run(
         previous_pointer = _existing_pointer(pointer_uri)
         if not refresh_existing:
             if previous_pointer is not None:
-                responses.append(str(previous_pointer["response_uri"]))
+                if not changed_only:
+                    responses.append(str(previous_pointer["response_uri"]))
                 skipped += 1
                 continue
         body, payload = _request(corp_code)
         observed_at = datetime.now(timezone.utc).isoformat()
         digest = hashlib.sha256(body).hexdigest()
         if previous_pointer is not None and previous_pointer.get("sha256") == digest:
-            responses.append(str(previous_pointer["response_uri"]))
+            if not changed_only:
+                responses.append(str(previous_pointer["response_uri"]))
             skipped += 1
+            time.sleep(financials.CALL_GAP_SEC)
             continue
         observed_partition = observed_at.replace(":", "").replace("+", "p")
         immutable_root = (
@@ -159,6 +166,43 @@ def run(
             )
         time.sleep(financials.CALL_GAP_SEC)
     return sorted(set(responses))
+
+
+def run_incremental(
+    day: str,
+    dest: str,
+    *,
+    shard_count: int = 20,
+) -> list[str]:
+    """Probe one deterministic weekday shard and return only changed profiles.
+
+    OpenDART has no industry-change feed. A rolling shard avoids a daily full
+    universe sweep while ensuring every listed company is revisited every four
+    scheduler weeks (the production schedule targets Monday-Friday data).
+    """
+    target = datetime.strptime(day, "%Y%m%d").date()
+    if shard_count < 1:
+        raise ValueError("shard_count must be positive")
+    base = base_uri(dest)
+    corps = financials.ensure_corp_code_xml(base)
+    weekday_slot = min(target.weekday(), 4)
+    shard = ((target.toordinal() // 7) * 5 + weekday_slot) % shard_count
+    selected = {
+        corp_code
+        for index, (corp_code, _ticker) in enumerate(corps)
+        if index % shard_count == shard
+    }
+    print(
+        f"[dart-company-profiles-incremental] day={day} "
+        f"shard={shard}/{shard_count} corporations={len(selected)}",
+        flush=True,
+    )
+    return run(
+        dest,
+        refresh_existing=True,
+        corp_codes=selected,
+        changed_only=True,
+    )
 
 
 def main() -> None:

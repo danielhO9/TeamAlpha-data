@@ -57,6 +57,11 @@ def _stub_main(monkeypatch, *, events: list[str]) -> None:
     monkeypatch.setenv("PIPELINE_DATE", "20260810")
     monkeypatch.setenv("DART_DIVIDENDS_ENABLED", "false")
     monkeypatch.setattr(daily_full.migrate, "assert_current", lambda: None)
+    monkeypatch.setattr(
+        daily_full.alternative_data_incremental,
+        "run",
+        lambda day, *, conn: None,
+    )
     lock = object()
     monkeypatch.setattr(
         daily_full.dart_silver_backfill_ecs,

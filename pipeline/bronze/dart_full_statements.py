@@ -108,6 +108,34 @@ def discover_scopes(
     return sorted(scopes)
 
 
+def discover_scopes_from_files(
+    files: list[str],
+) -> list[tuple[str, int, str, str]]:
+    """Discover only scopes represented by explicitly changed major files."""
+    scopes: set[tuple[str, int, str, str]] = set()
+    for uri in sorted(set(files)):
+        match = _MAJOR_KEY_RE.search(uri.replace("\\", "/"))
+        if match is None:
+            continue
+        raw = read_bytes(uri)
+        if raw is None:
+            raise RuntimeError(f"Bronze object is missing: {uri}")
+        rows = json.loads(raw.decode("utf-8"))
+        if not isinstance(rows, list):
+            raise RuntimeError(f"invalid major-account Bronze object: {uri}")
+        for fs_type in sorted({
+            str(row.get("fs_div") or "").strip()
+            for row in rows if isinstance(row, dict)
+        } & {"CFS", "OFS"}):
+            scopes.add((
+                match.group("ticker"),
+                int(match.group("year")),
+                match.group("report"),
+                fs_type,
+            ))
+    return sorted(scopes)
+
+
 def _request_scope(
     corp_code: str,
     year: int,
@@ -258,27 +286,18 @@ def _existing_response(pointer_uri: str) -> str | None:
     return response_uri
 
 
-def run(
-    from_year: int,
-    to_year: int,
-    dest: str,
+def _collect_scopes(
+    base: str,
+    scopes: list[tuple[str, int, str, str]],
     *,
-    refresh_existing: bool = False,
-    max_scopes: int | None = None,
+    dest: str,
+    refresh_existing: bool,
+    changed_only: bool,
 ) -> list[str]:
-    """Collect all discovered scopes and return immutable response URIs."""
-    if from_year < 2015 or to_year < from_year:
-        raise ValueError("OpenDART full statements require 2015 <= from_year <= to_year")
-    base = base_uri(dest)
-    scopes = discover_scopes(base, from_year, to_year)
-    if max_scopes is not None:
-        if max_scopes < 1:
-            raise ValueError("max_scopes must be positive")
-        scopes = scopes[:max_scopes]
     corp_by_stock: dict[str, str] | None = None
     print(
         f"[dart-full-statements] scopes={len(scopes)} "
-        f"years={from_year}..{to_year} dest={dest}",
+        f"dest={dest} refresh={refresh_existing}",
         flush=True,
     )
     responses: list[str] = []
@@ -286,10 +305,11 @@ def run(
     for index, (ticker, year, report_code, fs_type) in enumerate(scopes, 1):
         root = _scope_root(base, ticker, year, report_code, fs_type)
         pointer_uri = f"{root}/latest.json"
+        previous = _existing_response(pointer_uri)
         if not refresh_existing:
-            existing = _existing_response(pointer_uri)
-            if existing is not None:
-                responses.append(existing)
+            if previous is not None:
+                if not changed_only:
+                    responses.append(previous)
                 skipped += 1
                 continue
             promoted = _promote_legacy_response(
@@ -311,6 +331,12 @@ def run(
         body, payload = _request_scope(corp_code, year, report_code, fs_type)
         digest = hashlib.sha256(body).hexdigest()
         response_uri = f"{root}/sha256={digest}/response.json"
+        if previous == response_uri:
+            if not changed_only:
+                responses.append(previous)
+            skipped += 1
+            time.sleep(financials.CALL_GAP_SEC)
+            continue
         write_bytes(body, response_uri)
         filing_ids = sorted({
             str(row.get("rcept_no") or "").strip()
@@ -343,6 +369,70 @@ def run(
             )
         time.sleep(financials.CALL_GAP_SEC)
     return sorted(set(responses))
+
+
+def run(
+    from_year: int,
+    to_year: int,
+    dest: str,
+    *,
+    refresh_existing: bool = False,
+    max_scopes: int | None = None,
+) -> list[str]:
+    """Collect all discovered scopes and return immutable response URIs."""
+    if from_year < 2015 or to_year < from_year:
+        raise ValueError("OpenDART full statements require 2015 <= from_year <= to_year")
+    base = base_uri(dest)
+    scopes = discover_scopes(base, from_year, to_year)
+    if max_scopes is not None:
+        if max_scopes < 1:
+            raise ValueError("max_scopes must be positive")
+        scopes = scopes[:max_scopes]
+    return _collect_scopes(
+        base,
+        scopes,
+        dest=dest,
+        refresh_existing=refresh_existing,
+        changed_only=False,
+    )
+
+
+def run_incremental(major_files: list[str], dest: str) -> list[str]:
+    """Refresh full statements only for changed major-account scopes."""
+    base = base_uri(dest)
+    scopes = discover_scopes_from_files(major_files)
+    return _collect_scopes(
+        base,
+        scopes,
+        dest=dest,
+        refresh_existing=True,
+        changed_only=True,
+    )
+
+
+def run_incremental_day(day: str, dest: str) -> list[str]:
+    """Refresh exact full-statement scopes disclosed on the target day."""
+    datetime.strptime(day, "%Y%m%d")
+    base = base_uri(dest)
+    corps = financials.ensure_corp_code_xml(base)
+    ticker_by_corp = dict(corps)
+    major_files: set[str] = set()
+    for disclosure_day in financials._incremental_disclosure_days(day):
+        for row in financials._regular_disclosures(base, disclosure_day):
+            corp_code = str(row.get("corp_code") or "").strip()
+            ticker = ticker_by_corp.get(corp_code)
+            scope = financials._regular_report_scopes(row.get("report_nm"))
+            if ticker is None or scope is None:
+                continue
+            year, report_codes = scope
+            for report_code in report_codes:
+                uri = (
+                    f"{base}/financials/dart/year={year}/corp={ticker}/"
+                    f"{report_code}.json"
+                )
+                if exists(uri):
+                    major_files.add(uri)
+    return run_incremental(sorted(major_files), dest)
 
 
 def main() -> None:

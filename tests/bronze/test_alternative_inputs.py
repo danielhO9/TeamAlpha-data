@@ -106,6 +106,96 @@ def test_full_statement_does_not_promote_mismatched_legacy_scope(tmp_path: Path)
     ) is None
 
 
+def test_full_statement_incremental_discovers_only_explicit_changed_files(
+    tmp_path: Path, monkeypatch,
+):
+    changed = tmp_path / "financials/dart/year=2026/corp=005930/11012.json"
+    changed.parent.mkdir(parents=True)
+    changed.write_text(json.dumps([{"fs_div": "CFS"}]), encoding="utf-8")
+    unrelated = tmp_path / "financials/dart/year=2026/corp=000660/11012.json"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text(json.dumps([{"fs_div": "OFS"}]), encoding="utf-8")
+
+    assert dart_full_statements.discover_scopes_from_files([str(changed)]) == [
+        ("005930", 2026, "11012", "CFS"),
+    ]
+
+
+def test_ownership_snapshot_fetches_every_page(monkeypatch):
+    calls: list[int] = []
+
+    def request(_name, _url, _corp, *, page_no=1, tries=4):
+        calls.append(page_no)
+        return b"raw", {
+            "status": "000",
+            "page_no": page_no,
+            "total_page": 2,
+            "list": [{"rcept_no": str(page_no)}],
+        }
+
+    monkeypatch.setattr(dart_ownership, "_request", request)
+    monkeypatch.setattr(dart_ownership.time, "sleep", lambda _seconds: None)
+    body, payload = dart_ownership._request_all("api", "url", "corp")
+
+    assert calls == [1, 2]
+    assert payload["list"] == [{"rcept_no": "1"}, {"rcept_no": "2"}]
+    assert json.loads(body)["total_count"] == 2
+
+
+def test_ownership_incremental_routes_disclosure_to_one_endpoint(
+    monkeypatch, tmp_path: Path,
+):
+    monkeypatch.setattr(dart_ownership, "base_uri", lambda _dest: str(tmp_path))
+    monkeypatch.setattr(
+        dart_ownership.financials,
+        "_incremental_disclosure_days",
+        lambda _day: ["20260901"],
+    )
+    monkeypatch.setattr(
+        dart_ownership,
+        "_disclosures",
+        lambda _base, _day: [{
+            "corp_code": "00126380",
+            "report_nm": "주식등의대량보유상황보고서",
+        }],
+    )
+    calls: list[dict] = []
+
+    def run(_dest, **kwargs):
+        calls.append(kwargs)
+        return ["changed.json"]
+
+    monkeypatch.setattr(dart_ownership, "run", run)
+    assert dart_ownership.run_incremental("20260901", "local") == ["changed.json"]
+    assert calls == [{
+        "refresh_existing": True,
+        "disclosure_types": ("FIVE_PERCENT",),
+        "corp_codes": {"00126380"},
+        "changed_only": True,
+    }]
+
+
+def test_company_profile_incremental_refreshes_one_shard(monkeypatch, tmp_path: Path):
+    corps = [(f"corp-{index}", f"{index:06d}") for index in range(40)]
+    monkeypatch.setattr(dart_company_profiles, "base_uri", lambda _dest: str(tmp_path))
+    monkeypatch.setattr(
+        dart_company_profiles.financials,
+        "ensure_corp_code_xml",
+        lambda _base: corps,
+    )
+    captured: dict = {}
+
+    def run(_dest, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(dart_company_profiles, "run", run)
+    dart_company_profiles.run_incremental("20260901", "local", shard_count=20)
+    assert captured["refresh_existing"] is True
+    assert captured["changed_only"] is True
+    assert len(captured["corp_codes"]) == 2
+
+
 def test_krx_export_requires_provenance_and_flow_columns(tmp_path: Path):
     valid = pd.DataFrame([{
         "일자": "2026-08-31",

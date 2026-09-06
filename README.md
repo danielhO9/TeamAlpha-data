@@ -642,6 +642,12 @@ uv run python -m pipeline.alternative_data_backfill_ecs --phase silver
 OpenDART 수집은 content-addressed pointer로 재개된다. 투자자수급·공매도 수집기는
 KRX 웹페이지를 스크레이핑하지 않으며 승인 원본과 취득근거가 없으면 fail-closed한다.
 현재 DART 업종과 오늘 받은 과거 공매도 파일은 최초 관측시각 이전으로 소급하지 않는다.
+초기 적재가 끝난 뒤 정기 `pipeline.daily_full`은 정기보고서가 접수된 회사의 전체
+재무제표 scope, 지분공시가 접수된 회사의 해당 ownership endpoint, 아직 publication
+되지 않은 승인 KRX 파일만 반영한다. 과거 효력일 변경 feed가 없는 DART 업종은 상장
+회사를 20개 shard로 나눠 영업일마다 한 shard만 확인하고, 실제 응답 hash가 바뀐
+관측값만 Silver에 추가한다. 날짜별 완료 checkpoint가 있어 같은 날 ECS 재시도는 이
+작업을 반복하지 않는다. shard 수는 `DART_INDUSTRY_SHARDS`로 조정할 수 있다.
 
 원자재 28종 전체 백필은 GitHub Actions의
 [`commodity-backfill.yml`](.github/workflows/commodity-backfill.yml)을 수동 실행할

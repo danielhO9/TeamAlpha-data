@@ -12,6 +12,7 @@ import re
 
 import boto3
 
+from pipeline import alternative_data_incremental
 from pipeline.bronze import (
     dart_company_profiles,
     dart_full_statements,
@@ -120,13 +121,17 @@ def publish_existing() -> dict:
     )):
         raise RuntimeError("no alternative-input Bronze objects found")
     migrate.run()
-    return alternative_data.publish_files(
+    summary = alternative_data.publish_files(
         full_statement_files=full_files,
         ownership_files=ownership_files,
         investor_flow_files=investor_files,
         industry_files=industry_files,
         short_balance_files=short_balance_files,
     )
+    alternative_data_incremental.mark_krx_published(
+        investor_files + short_balance_files,
+    )
+    return summary
 
 
 def parse_args() -> argparse.Namespace:

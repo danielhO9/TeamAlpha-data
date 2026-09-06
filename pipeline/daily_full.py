@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import exchange_calendars as xcals
 
-from pipeline import dart_silver_backfill_ecs
+from pipeline import alternative_data_incremental, dart_silver_backfill_ecs
 from pipeline.bronze import (
     corporate_actions,
     dart_support_action_families,
@@ -178,6 +178,7 @@ def _main_locked(
     collect_financials: bool = True,
     full_year_financial_snapshot: bool = False,
     bounded_action_scope: bool = False,
+    collect_alternative: bool = True,
 ) -> None:
     """Run one target day while the caller owns the certification epoch.
 
@@ -229,6 +230,8 @@ def _main_locked(
             "skipping source collection, matching, and total-return rebuild",
             flush=True,
         )
+        if collect_alternative:
+            alternative_data_incremental.run(day, conn=certification_lock)
         _run_fmp_incremental(
             bucket, root, day, certification_lock=certification_lock,
         )
@@ -566,6 +569,10 @@ def _main_locked(
             f"[total-return] deferred closure after gap day={day}",
             flush=True,
         )
+
+    if collect_alternative:
+        assert_epoch()
+        alternative_data_incremental.run(day, conn=certification_lock)
 
     # FMP is a separate source transaction. KRX/DART remains committed if FMP
     # later fails, and a task retry safely reuses the immutable raw objects.
