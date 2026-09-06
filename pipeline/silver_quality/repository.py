@@ -38,6 +38,7 @@ WARNING_TRACKED_MODES = frozenset({
     "fmp_commodity_backfill",
     "krx_total_return_rebuild",
     "maintenance_konex_exclusion",
+    "alternative_research_inputs",
 })
 # Backwards-compatible alias (older imports referenced this name).
 INCREMENTAL_WARNING_MODES = WARNING_TRACKED_MODES
