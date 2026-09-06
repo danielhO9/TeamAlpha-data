@@ -90,8 +90,8 @@ def run(
                 preview_total_return=final,
                 close_total_return=final,
                 assert_final_freshness=final,
-                collect_financials=final,
-                full_year_financial_snapshot=final,
+                collect_financials=True,
+                full_year_financial_snapshot=False,
                 bounded_action_scope=not final,
             )
             print(f"[gap-replay] complete day={day}", flush=True)

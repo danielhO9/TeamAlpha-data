@@ -22,9 +22,11 @@ import argparse
 import io
 import json
 import os
+import re
 import time
 import zipfile
 from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -39,6 +41,7 @@ from pipeline.common.sink import (
 )
 
 CORPCODE_URL = "https://opendart.fss.or.kr/api/corpCode.xml"
+DISCLOSURE_LIST_URL = "https://opendart.fss.or.kr/api/list.json"
 MULTI_URL = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
 SINGLE_ALL_URL = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
 REPRT_CODES = ["11011", "11013", "11012", "11014"]  # 사업(FY)/1분기/반기/3분기
@@ -51,6 +54,9 @@ MAJOR_ACCOUNT_NAMES = {
     "당기순이익",
     "당기순이익(손실)",
 }
+_REGULAR_REPORT_RE = re.compile(
+    r"(사업|반기|분기)보고서.*?\(((?:19|20)\d{2})\.(\d{2})\)"
+)
 
 
 class QuotaExceeded(Exception):
@@ -148,6 +154,246 @@ def _fetch_multi(corp_codes: list[str], year: int, reprt: str, tries: int = 4) -
         except Exception:  # noqa: BLE001  (네트워크 blip·JSON 오류 → 재시도)
             time.sleep(2 * (attempt + 1))
     return "?", None
+
+
+def _fetch_regular_disclosure_page(
+    day: str,
+    page_no: int,
+    tries: int = 4,
+) -> dict:
+    """Fetch one complete-day periodic-disclosure page, including corrections."""
+    params = {
+        "crtfc_key": os.environ["DART_API_KEY"],
+        "bgn_de": day,
+        "end_de": day,
+        "last_reprt_at": "N",
+        "pblntf_ty": "A",
+        "page_no": str(page_no),
+        "page_count": "100",
+    }
+    for attempt in range(tries):
+        try:
+            payload = requests.get(
+                DISCLOSURE_LIST_URL,
+                params=params,
+                timeout=60,
+            ).json()
+            status = str(payload.get("status") or "?")
+            if status == "020":
+                raise QuotaExceeded(f"regular-disclosure-list {day}")
+            if status in {"000", "013"}:
+                return payload
+            raise RuntimeError(
+                "OpenDART regular-disclosure list rejected: "
+                f"status={status}, day={day}, page={page_no}"
+            )
+        except QuotaExceeded:
+            raise
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            if attempt + 1 < tries:
+                time.sleep(2 * (attempt + 1))
+    raise RuntimeError(
+        "OpenDART regular-disclosure list failed after retries: "
+        f"day={day}, page={page_no}"
+    )
+
+
+def _regular_disclosure_path(base: str, day: str) -> str:
+    rendered = datetime.strptime(day, "%Y%m%d").date().isoformat()
+    return (
+        f"{base}/financials/dart_disclosures/date={rendered}/"
+        "regular-reports.json"
+    )
+
+
+def _regular_disclosures(base: str, day: str) -> list[dict]:
+    """Return a durable complete list for one filing date."""
+    path = _regular_disclosure_path(base, day)
+    raw = read_bytes(path)
+    if raw is not None:
+        rows = json.loads(raw.decode("utf-8"))
+        if not isinstance(rows, list):
+            raise RuntimeError(f"invalid regular-disclosure checkpoint: {path}")
+        return rows
+
+    by_receipt: dict[str, dict] = {}
+    page_no = 1
+    while True:
+        payload = _fetch_regular_disclosure_page(day, page_no)
+        for row in payload.get("list") or []:
+            if not isinstance(row, dict):
+                continue
+            receipt = str(row.get("rcept_no") or "").strip()
+            if re.fullmatch(r"\d{14}", receipt):
+                by_receipt[receipt] = row
+        total_page = int(payload.get("total_page") or 0)
+        if str(payload.get("status") or "?") == "013" or page_no >= total_page:
+            break
+        page_no += 1
+    rows = [by_receipt[key] for key in sorted(by_receipt)]
+    write_text_if_changed(json.dumps(rows, ensure_ascii=False), path)
+    return rows
+
+
+def _regular_report_scopes(report_name: object) -> tuple[int, tuple[str, ...]] | None:
+    """Map a DART periodic report title to financial API report scopes.
+
+    DART uses one detail type for both first- and third-quarter reports.  Query
+    both quarter codes for an affected company so non-December fiscal years are
+    not guessed from the calendar month in the title.
+    """
+    compact = re.sub(r"\s+", "", str(report_name or ""))
+    match = _REGULAR_REPORT_RE.search(compact)
+    if match is None:
+        return None
+    report_kind, year, _month = match.groups()
+    codes = {
+        "사업": ("11011",),
+        "반기": ("11012",),
+        "분기": ("11013", "11014"),
+    }[report_kind]
+    return int(year), codes
+
+
+def _incremental_disclosure_days(day: str) -> list[str]:
+    """Include weekend filing dates preceding a Monday pipeline target."""
+    target = datetime.strptime(day, "%Y%m%d").date()
+    days = [target]
+    cursor = target - timedelta(days=1)
+    while cursor.weekday() >= 5:
+        days.append(cursor)
+        cursor -= timedelta(days=1)
+    return [value.strftime("%Y%m%d") for value in sorted(days)]
+
+
+def run_incremental(day: str, dest: str) -> list[str]:
+    """Refresh only companies that filed a periodic report on ``day``.
+
+    A one-call disclosure search replaces the former daily current-year sweep.
+    Affected companies are still grouped into the provider's 100-company
+    endpoint, and amended reports are included by ``last_reprt_at=N``.
+    """
+    datetime.strptime(day, "%Y%m%d")
+    base = base_uri(dest)
+    corps = ensure_corp_code_xml(base)
+    corp_to_stock = dict(corps)
+    stock_to_corp = {stock: corp for corp, stock in corps}
+    groups: dict[tuple[int, str], set[str]] = defaultdict(set)
+    requirements: dict[tuple[str, int], set[str]] = defaultdict(set)
+    disclosures = [
+        row
+        for disclosure_day in _incremental_disclosure_days(day)
+        for row in _regular_disclosures(base, disclosure_day)
+    ]
+    for row in disclosures:
+        corp_code = str(row.get("corp_code") or "").strip()
+        if corp_code not in corp_to_stock:
+            continue
+        scope = _regular_report_scopes(row.get("report_nm"))
+        if scope is None:
+            continue
+        year, report_codes = scope
+        for report_code in report_codes:
+            groups[(year, report_code)].add(corp_code)
+            requirements[(corp_code, year)].add(report_code)
+
+    print(
+        f"[financials-incremental] day={day} disclosures={len(disclosures)} "
+        f"scopes={sum(len(values) for values in groups.values())} dest={dest}",
+        flush=True,
+    )
+    changed_paths: list[str] = []
+    satisfied: set[tuple[str, int, str]] = set()
+    api_calls = full_calls = 0
+    for (year, report_code), affected in sorted(groups.items()):
+        ordered = sorted(affected)
+        for offset in range(0, len(ordered), BATCH):
+            batch = ordered[offset:offset + BATCH]
+            status, payload = _fetch_multi(batch, year, report_code)
+            api_calls += 1
+            if status == "020":
+                raise QuotaExceeded(f"{year} {report_code}")
+            if status == "013":
+                continue
+            if status != "000" or payload is None:
+                raise RuntimeError(
+                    "OpenDART incremental financial request failed: "
+                    f"status={status}, year={year}, report={report_code}"
+                )
+            by_ticker: dict[str, list[dict]] = defaultdict(list)
+            for row in payload.get("list") or []:
+                ticker = str(row.get("stock_code") or "").strip()
+                if ticker:
+                    by_ticker[ticker].append(row)
+            for ticker, rows in sorted(by_ticker.items()):
+                returned_corp = stock_to_corp.get(ticker)
+                if returned_corp is None:
+                    raise RuntimeError(
+                        "OpenDART returned an unexpected listed ticker: "
+                        f"ticker={ticker}, year={year}, report={report_code}"
+                    )
+                satisfied.add((returned_corp, year, report_code))
+                path = (
+                    f"{base}/financials/dart/year={year}/corp={ticker}/"
+                    f"{report_code}.json"
+                )
+                if write_text_if_changed(
+                    json.dumps(rows, ensure_ascii=False), path,
+                ):
+                    changed_paths.append(path)
+                for fs_div in _missing_major_scopes(rows):
+                    full_calls += 1
+                    status_full, full_payload = _fetch_single_all(
+                        stock_to_corp[ticker], year, report_code, fs_div,
+                    )
+                    if status_full == "020":
+                        raise QuotaExceeded(
+                            f"full-statement {year} {report_code} "
+                            f"{ticker} {fs_div}"
+                        )
+                    if status_full == "013":
+                        continue
+                    if status_full != "000" or full_payload is None:
+                        raise RuntimeError(
+                            "OpenDART incremental full-statement request failed: "
+                            f"status={status_full}, year={year}, "
+                            f"report={report_code}, ticker={ticker}, "
+                            f"fs_div={fs_div}"
+                        )
+                    full_rows = full_payload.get("list") or []
+                    if not full_rows:
+                        continue
+                    full_path = (
+                        f"{base}/financials/dart_full/year={year}/"
+                        f"corp={ticker}/{report_code}-{fs_div}.json"
+                    )
+                    if write_text_if_changed(
+                        json.dumps(full_rows, ensure_ascii=False), full_path,
+                    ):
+                        changed_paths.append(full_path)
+                    time.sleep(CALL_GAP_SEC)
+            time.sleep(CALL_GAP_SEC)
+    missing = sorted(
+        (corp_code, year, sorted(report_codes))
+        for (corp_code, year), report_codes in requirements.items()
+        if not any(
+            (corp_code, year, report_code) in satisfied
+            for report_code in report_codes
+        )
+    )
+    if missing:
+        raise RuntimeError(
+            "OpenDART periodic disclosures are not available from the "
+            f"financial endpoint yet: {missing[:20]}"
+        )
+    print(
+        f"[financials-incremental] complete changed={len(changed_paths)} "
+        f"major_calls={api_calls} full_calls={full_calls}",
+        flush=True,
+    )
+    return sorted(set(changed_paths))
 
 
 def _fetch_single_all(

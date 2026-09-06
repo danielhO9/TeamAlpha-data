@@ -26,8 +26,7 @@ from pipeline.common.paths import base_uri, ymd_to_dash
 from pipeline.silver import load
 from pipeline.silver import fmp_load
 from pipeline.silver.dart_action_snapshot import DEFAULT_COVERAGE_START
-from pipeline.silver_quality import freshness
-from pipeline.silver_quality import migrate
+from pipeline.silver_quality import freshness, migrate, repository
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -217,12 +216,32 @@ def _main_locked(
 
     print(f"[daily] start day={day}", flush=True)
     migrate.assert_current()
+    if (
+        repository.certified_target_exists(
+            certification_lock, "daily", coverage_end,
+        )
+        and dart_silver_backfill_ecs.total_return_contract_ready(
+            conn=certification_lock,
+        )
+    ):
+        print(
+            f"[daily] KRX/DART already certified day={day}; "
+            "skipping source collection, matching, and total-return rebuild",
+            flush=True,
+        )
+        _run_fmp_incremental(
+            bucket, root, day, certification_lock=certification_lock,
+        )
+        if assert_final_freshness:
+            fr = freshness.assert_fresh()
+            print(f"[freshness] ok {fr['sources']}", flush=True)
+        else:
+            print(f"[freshness] deferred after gap day={day}", flush=True)
+        return
     stock_krxapi.run(day, day, "s3")
     index.run(day, day, "s3")
     if collect_financials:
-        changed_financial_uris = financials.run(
-            int(day[:4]), int(day[:4]), "s3", refresh_existing=True,
-        )
+        changed_financial_uris = financials.run_incremental(day, "s3")
     else:
         changed_financial_uris = []
         print("[daily] DART financial refresh deferred", flush=True)
@@ -550,14 +569,9 @@ def _main_locked(
 
     # FMP is a separate source transaction. KRX/DART remains committed if FMP
     # later fails, and a task retry safely reuses the immutable raw objects.
-    fmp_day = _fmp_target_day(day)
-    assert_epoch()
-    print(f"[fmp] daily start day={fmp_day}", flush=True)
-    fmp_uris = fmp_bronze.run_daily(fmp_day, "s3")
-    fmp_keys = [_key_from_s3_uri(uri) for uri in fmp_uris]
-    _download_keys(bucket, fmp_keys, root)
-    fmp_load.run(src="local", day=fmp_day)
-    print(f"[fmp] daily complete day={fmp_day}", flush=True)
+    _run_fmp_incremental(
+        bucket, root, day, certification_lock=certification_lock,
+    )
 
     # A BUILDING/drifted total-return contract or stale source is a task
     # failure.  Do not emit a false-green ECS exit after source publication.
@@ -566,6 +580,32 @@ def _main_locked(
         print(f"[freshness] ok {fr['sources']}", flush=True)
     else:
         print(f"[freshness] deferred after gap day={day}", flush=True)
+
+
+def _run_fmp_incremental(
+    bucket: str,
+    root: Path,
+    krx_day: str,
+    *,
+    certification_lock,
+) -> None:
+    """Publish the FMP day once; retries reuse its certified transaction."""
+    fmp_day = _fmp_target_day(krx_day)
+    parsed_fmp_day = datetime.strptime(fmp_day, "%Y%m%d").date()
+    dart_silver_backfill_ecs.assert_daily_certification_lock(
+        certification_lock,
+    )
+    if repository.certified_target_exists(
+        certification_lock, "fmp_daily", parsed_fmp_day,
+    ):
+        print(f"[fmp] already certified day={fmp_day}; skipped", flush=True)
+        return
+    print(f"[fmp] daily start day={fmp_day}", flush=True)
+    fmp_uris = fmp_bronze.run_daily(fmp_day, "s3")
+    fmp_keys = [_key_from_s3_uri(uri) for uri in fmp_uris]
+    _download_keys(bucket, fmp_keys, root)
+    fmp_load.run(src="local", day=fmp_day)
+    print(f"[fmp] daily complete day={fmp_day}", flush=True)
 
 
 if __name__ == "__main__":

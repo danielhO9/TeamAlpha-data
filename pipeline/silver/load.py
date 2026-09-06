@@ -44,7 +44,7 @@ def _build_candidates(
     financial_files: list[str] | None,
     dividend_files: list[str] | None,
 ) -> CandidateBundle:
-    asset_df, identifier_df = assets.prepare(base)
+    asset_df, identifier_df = assets.prepare(base, target_date=target_date)
     preferred_to_common = assets.preferred_share_issuer_map(asset_df)
     price_df, price_stats = prices.prepare(base, target_date=target_date)
     all_price_identifiers = set(

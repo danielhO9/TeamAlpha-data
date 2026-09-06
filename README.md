@@ -466,8 +466,9 @@ python -m pipeline.daily_full
 1. 공통 PostgreSQL session advisory lock을 먼저 잡아 다른 daily/one-off 인증
    epoch와 전체 실행을 직렬화합니다.
 2. 대상 날짜의 KRX 주식/지수 Bronze를 S3에 저장합니다.
-3. 당해 연도 DART 재무·정기보고서 배당과 기업행사를 확인하고 변경 원문만 저장합니다.
-   새 action 객체는 S3 PUT 전에 총수익 계약을 `BUILDING`으로 먼저 내립니다.
+3. 대상일의 DART 정기공시 목록에서 새로 제출되거나 정정된 사업·분기·반기보고서만
+   찾아 해당 회사·보고서의 재무와 배당을 갱신합니다. 새 action 객체는 S3 PUT 전에
+   총수익 계약을 `BUILDING`으로 먼저 내립니다.
 4. complete DART/KRX 증거를 ECS 컨테이너의 `/app/data`로 동기화하고, official
    viewer/support family와 v5 action snapshot을 재생성·검증합니다.
 5. KRX/DART Silver 후보를 생성하고 자동 품질 검사와 read-only preview를 수행합니다.
@@ -481,6 +482,12 @@ python -m pipeline.daily_full
    가격/action이 있으면 총수익 계약은 의도적으로 `BUILDING`에 남습니다.
 9. 인증된 증분 warning은 `dq_warning_state`에 누적하고, 같은 변경 파티션의 재검사가
    PASS일 때만 해소합니다. 미해결 warning은 `dq_open_warning`에서 바로 조회합니다.
+
+동일 날짜 재시도에서는 `dq_run`의 인증 영수증을 먼저 확인합니다. KRX/DART와
+총수익 계약이 이미 인증되었으면 해당 수집·매칭·전체 rebuild를 건너뛰고, FMP도
+같은 미국 세션이 인증되어 있으면 다시 호출하거나 적재하지 않습니다. 밀린 날짜를
+연속 처리할 때는 각 날짜의 정기공시만 증분 수집하고 총수익 전체 rebuild는 마지막
+날짜에서 한 번만 수행합니다.
 
 Critical/Error 중 단일 행 불변조건은 RDS CHECK·PK·UNIQUE·FK로도 강제합니다.
 따라서 애플리케이션 품질검사를 우회한 쓰기도 DB에서 거부되며, 시계열·소스 간 대사와

@@ -22,9 +22,33 @@ BENCHMARKS = {"코스피 200": ("KOSPI200", "1028"), "코스닥 150": ("KOSDAQ15
 _PREFERRED_SUFFIX = re.compile(r"(?:\d*우(?:[A-Z])?|우선주)$")
 
 
-def _stock_universe(base: str) -> dict[str, str]:
-    """marcap + krxapi 전 날짜 union → {ticker: name} (최근 이름 우선, 상폐 포함)."""
+def _stock_universe(
+    base: str,
+    target_date: date | None = None,
+) -> dict[str, str]:
+    """Return the daily partition, or the full historical universe for backfill."""
     names: dict[str, str] = {}
+    if target_date is not None:
+        pattern = f"{base}/stock/krxapi/date={target_date.isoformat()}/*.parquet"
+        paths = sorted(glob.glob(pattern))
+        if not paths:
+            available = sorted(glob.glob(f"{base}/stock/krxapi/date=*/*.parquet"))
+            if available:
+                latest_partition = max(
+                    re.search(r"/date=(\d{4}-\d{2}-\d{2})/", path).group(1)
+                    for path in available
+                    if re.search(r"/date=(\d{4}-\d{2}-\d{2})/", path)
+                )
+                paths = [
+                    path for path in available
+                    if f"/date={latest_partition}/" in path.replace("\\", "/")
+                ]
+        for path in paths:
+            frame = pd.read_parquet(path, columns=["ISU_CD", "ISU_NM"])
+            names.update(zip(
+                frame["ISU_CD"].astype(str), frame["ISU_NM"].astype(str),
+            ))
+        return names
     for f in sorted(glob.glob(f"{base}/stock/marcap/date=*/all.parquet")):
         df = pd.read_parquet(f, columns=["Code", "Name"])
         names.update(zip(df["Code"].astype(str), df["Name"].astype(str)))
@@ -34,12 +58,15 @@ def _stock_universe(base: str) -> dict[str, str]:
     return names
 
 
-def prepare(base: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def prepare(
+    base: str,
+    target_date: date | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Bronze에서 asset/identifier 후보를 만든다.
 
     natural_key는 현재 KRX ticker다. identifier 충돌은 quality rule과 publish 양쪽에서 차단한다.
     """
-    names = _stock_universe(base)
+    names = _stock_universe(base, target_date=target_date)
     corp = {sc: cc for cc, sc in financials.load_listed_corps_from_bronze(base)}  # ticker→corp_code
 
     asset_rows = [
@@ -195,15 +222,41 @@ def publish(
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT identifier, asset_id FROM asset_identifier "
-            "WHERE source='KRX' AND valid_to IS NULL"
+            """
+            SELECT ai.identifier, ai.asset_id,
+                   a.name, a.asset_type, a.instrument_type, a.exchange,
+                   a.currency, a.country_code, a.base_currency,
+                   a.listed_from, a.listed_to
+            FROM asset_identifier ai
+            JOIN asset a ON a.asset_id=ai.asset_id
+            WHERE ai.source='KRX'
+              AND ai.identifier_type='ticker'
+              AND ai.valid_to IS NULL
+            """
         )
-        krx_map = dict(cur.fetchall())
+        existing_assets = {
+            str(row[0]): row[1:] for row in cur.fetchall()
+        }
+        krx_map = {
+            identifier: int(values[0])
+            for identifier, values in existing_assets.items()
+        }
         natural_to_id: dict[str, int] = {}
+        changed_assets = 0
         for row in asset_candidates.itertuples(index=False):
             natural_key = str(row.natural_key)
             if natural_key in krx_map:
                 natural_to_id[natural_key] = krx_map[natural_key]
+                existing = existing_assets[natural_key]
+                desired = (
+                    row.name, row.asset_type, row.instrument_type,
+                    row.exchange, row.currency, row.country_code,
+                    row.base_currency,
+                    existing[8] if pd.isna(row.listed_from) else row.listed_from,
+                    None if pd.isna(row.listed_to) else row.listed_to,
+                )
+                if tuple(existing[1:]) == desired:
+                    continue
                 cur.execute(
                     """
                     UPDATE asset
@@ -221,6 +274,7 @@ def publish(
                         quality_run_id, krx_map[natural_key],
                     ),
                 )
+                changed_assets += 1
                 continue
             cur.execute(
                 """
@@ -239,24 +293,42 @@ def publish(
             )
             aid = cur.fetchone()[0]
             natural_to_id[natural_key] = aid
+            changed_assets += 1
 
+        cur.execute(
+            """
+            SELECT source, identifier_type, identifier, asset_id,
+                   valid_from, valid_to
+            FROM asset_identifier
+            WHERE valid_to IS NULL
+            """
+        )
+        active_identifiers = {
+            (str(source), str(identifier_type), str(identifier)): (
+                int(asset_id), valid_from, valid_to,
+            )
+            for source, identifier_type, identifier, asset_id,
+            valid_from, valid_to in cur.fetchall()
+        }
+        changed_identifiers = 0
         for row in identifier_candidates.itertuples(index=False):
             aid = natural_to_id.get(str(row.natural_key)) or krx_map.get(str(row.natural_key))
             if aid is None:
                 continue
-            cur.execute(
-                "SELECT asset_id FROM asset_identifier "
-                "WHERE source=%s AND identifier_type=%s AND identifier=%s "
-                "AND valid_to IS NULL",
-                (row.source, row.identifier_type, str(row.identifier)),
+            identity = (
+                str(row.source), str(row.identifier_type), str(row.identifier),
             )
-            existing = cur.fetchone()
+            existing = active_identifiers.get(identity)
             if existing and existing[0] != aid:
                 raise RuntimeError(
                     "identifier mapping conflict: "
                     f"source={row.source}, identifier={row.identifier}, "
                     f"existing_asset_id={existing[0]}, candidate_asset_id={aid}"
                 )
+            desired_valid_from = row.valid_from
+            desired_valid_to = None if pd.isna(row.valid_to) else row.valid_to
+            if existing == (aid, desired_valid_from, desired_valid_to):
+                continue
             cur.execute(
                 """
                 INSERT INTO asset_identifier (
@@ -272,16 +344,22 @@ def publish(
                 """,
                 (
                     aid, row.source, str(row.identifier), row.identifier_type,
-                    row.valid_from, row.valid_to, quality_run_id,
+                    desired_valid_from, desired_valid_to, quality_run_id,
                 ),
             )
+            changed_identifiers += 1
 
         cur.execute(
             "SELECT identifier, asset_id FROM asset_identifier "
             "WHERE source='KRX' AND valid_to IS NULL"
         )
         krx_map = dict(cur.fetchall())
-    print(f"[assets] asset candidates={len(asset_candidates)}, KRX identifiers={len(krx_map)}")
+    print(
+        f"[assets] candidates={len(asset_candidates)} "
+        f"changed_assets={changed_assets} "
+        f"changed_identifiers={changed_identifiers} "
+        f"KRX identifiers={len(krx_map)}"
+    )
     return krx_map
 
 

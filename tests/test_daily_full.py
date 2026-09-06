@@ -75,7 +75,14 @@ def _stub_main(monkeypatch, *, events: list[str]) -> None:
     )
     monkeypatch.setattr(daily_full.stock_krxapi, "run", lambda *a: None)
     monkeypatch.setattr(daily_full.index, "run", lambda *a: None)
-    monkeypatch.setattr(daily_full.financials, "run", lambda *a, **k: [])
+    monkeypatch.setattr(
+        daily_full.financials, "run_incremental", lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        daily_full.repository,
+        "certified_target_exists",
+        lambda *args, **kwargs: False,
+    )
 
     def action_run(*args, **kwargs):
         return [daily_full._action_disclosure_manifest_key(
@@ -157,6 +164,35 @@ def test_daily_closes_total_return_before_fmp_and_freshness(monkeypatch):
     ]
 
 
+def test_same_day_retry_skips_certified_krx_dart_tr_and_fmp(monkeypatch):
+    events: list[str] = []
+    _stub_main(monkeypatch, events=events)
+    monkeypatch.setattr(
+        daily_full.repository,
+        "certified_target_exists",
+        lambda _conn, mode, _day: mode in {"daily", "fmp_daily"},
+    )
+    monkeypatch.setattr(
+        daily_full.stock_krxapi,
+        "run",
+        lambda *_args: pytest.fail("KRX collection must be skipped"),
+    )
+    monkeypatch.setattr(
+        daily_full.financials,
+        "run_incremental",
+        lambda *_args: pytest.fail("DART collection must be skipped"),
+    )
+    monkeypatch.setattr(
+        daily_full.fmp_bronze,
+        "run_daily",
+        lambda *_args: pytest.fail("FMP collection must be skipped"),
+    )
+
+    daily_full.main()
+
+    assert events == ["freshness"]
+
+
 def test_holiday_financial_refresh_closes_actual_post_publish_invalidation(
     monkeypatch,
 ):
@@ -175,7 +211,7 @@ def test_holiday_financial_refresh_closes_actual_post_publish_invalidation(
     )
     monkeypatch.setattr(
         daily_full.financials,
-        "run",
+        "run_incremental",
         lambda *args, **kwargs: [
             "s3://bronze/financials/dart/year=2026/corp=005930.json"
         ],
@@ -227,7 +263,7 @@ def test_holiday_financial_refresh_does_not_close_when_contract_stays_ready(
     _stub_main(monkeypatch, events=events)
     monkeypatch.setattr(
         daily_full.financials,
-        "run",
+        "run_incremental",
         lambda *args, **kwargs: [
             "s3://bronze/financials/dart/year=2026/corp=005930.json"
         ],

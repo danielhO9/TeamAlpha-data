@@ -115,6 +115,23 @@ def get_run(conn, run_id: UUID) -> BatchContext:
     return BatchContext(run_id, row[0], row[1], row[2], row[3], row[4])
 
 
+def certified_target_exists(conn, mode: str, target_date: date) -> bool:
+    """Return whether a source/date transaction already finished successfully."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM dq_run
+                WHERE mode=%s AND target_date=%s AND status='CERTIFIED'
+            )
+            """,
+            (mode, target_date),
+        )
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
 def save_results(conn, run_id: UUID, results: list[CheckResult]) -> None:
     if not results:
         return
