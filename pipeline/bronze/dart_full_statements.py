@@ -170,6 +170,79 @@ def _scope_root(
     )
 
 
+def _promote_legacy_response(
+    base: str,
+    ticker: str,
+    year: int,
+    report_code: str,
+    fs_type: str,
+) -> str | None:
+    """Reuse a verified ``financials/dart_full`` body without another API call.
+
+    The pre-existing collector stored the OpenDART ``list`` bytes rather than
+    the surrounding response object.  The Silver parser deliberately accepts
+    that legacy shape.  Copy the exact bytes into the new content-addressed
+    namespace and publish its scope pointer only after the rows prove that
+    they belong to the requested scope.
+    """
+    legacy_uri = (
+        f"{base}/financials/dart_full/year={year}/corp={ticker}/"
+        f"{report_code}-{fs_type}.json"
+    )
+    raw = read_bytes(legacy_uri)
+    if raw is None:
+        return None
+    try:
+        rows = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        if str(row.get("fs_div") or "").strip() != fs_type:
+            return None
+        row_report = str(row.get("reprt_code") or report_code).strip()
+        row_year = str(row.get("bsns_year") or year).strip()
+        row_ticker = str(row.get("stock_code") or ticker).strip()
+        if (
+            row_report != report_code
+            or row_year != str(year)
+            or row_ticker != ticker
+        ):
+            return None
+
+    digest = hashlib.sha256(raw).hexdigest()
+    root = _scope_root(base, ticker, year, report_code, fs_type)
+    response_uri = f"{root}/sha256={digest}/response.json"
+    pointer_uri = f"{root}/latest.json"
+    write_bytes(raw, response_uri)
+    filing_ids = sorted({
+        str(row.get("rcept_no") or "").strip()
+        for row in rows
+        if str(row.get("rcept_no") or "").strip()
+    })
+    pointer = {
+        "schema_version": "dart-full-statement-pointer-v1",
+        "ticker": ticker,
+        "year": year,
+        "report_code": report_code,
+        "fs_type": fs_type,
+        "status": "000",
+        "filing_ids": filing_ids,
+        "sha256": digest,
+        "response_uri": response_uri,
+        "source_format": "legacy-financials-dart-full-list-v1",
+        "source_uri": legacy_uri,
+        "promoted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_text_if_changed(
+        json.dumps(pointer, ensure_ascii=False, sort_keys=True), pointer_uri,
+    )
+    return response_uri
+
+
 def _existing_response(pointer_uri: str) -> str | None:
     raw = read_bytes(pointer_uri)
     if raw is None:
@@ -202,21 +275,15 @@ def run(
         if max_scopes < 1:
             raise ValueError("max_scopes must be positive")
         scopes = scopes[:max_scopes]
-    corp_by_stock = {
-        stock_code: corp_code
-        for corp_code, stock_code in financials.ensure_corp_code_xml(base)
-    }
+    corp_by_stock: dict[str, str] | None = None
     print(
         f"[dart-full-statements] scopes={len(scopes)} "
         f"years={from_year}..{to_year} dest={dest}",
         flush=True,
     )
     responses: list[str] = []
-    fetched = skipped = 0
+    fetched = skipped = reused_legacy = 0
     for index, (ticker, year, report_code, fs_type) in enumerate(scopes, 1):
-        corp_code = corp_by_stock.get(ticker)
-        if corp_code is None:
-            raise RuntimeError(f"DART corp code missing for ticker={ticker}")
         root = _scope_root(base, ticker, year, report_code, fs_type)
         pointer_uri = f"{root}/latest.json"
         if not refresh_existing:
@@ -225,6 +292,22 @@ def run(
                 responses.append(existing)
                 skipped += 1
                 continue
+            promoted = _promote_legacy_response(
+                base, ticker, year, report_code, fs_type,
+            )
+            if promoted is not None:
+                responses.append(promoted)
+                reused_legacy += 1
+                continue
+        if corp_by_stock is None:
+            corp_by_stock = {
+                stock_code: corp_code
+                for corp_code, stock_code
+                in financials.ensure_corp_code_xml(base)
+            }
+        corp_code = corp_by_stock.get(ticker)
+        if corp_code is None:
+            raise RuntimeError(f"DART corp code missing for ticker={ticker}")
         body, payload = _request_scope(corp_code, year, report_code, fs_type)
         digest = hashlib.sha256(body).hexdigest()
         response_uri = f"{root}/sha256={digest}/response.json"
@@ -254,7 +337,8 @@ def run(
         if index % 100 == 0 or index == len(scopes):
             print(
                 f"[dart-full-statements] {index}/{len(scopes)} "
-                f"fetched={fetched} skipped={skipped}",
+                f"fetched={fetched} skipped={skipped} "
+                f"reused_legacy={reused_legacy}",
                 flush=True,
             )
         time.sleep(financials.CALL_GAP_SEC)

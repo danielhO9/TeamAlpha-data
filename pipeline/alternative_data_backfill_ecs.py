@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 import boto3
 
@@ -35,6 +36,25 @@ def _list_response_uris(bucket: str, prefix: str) -> list[str]:
                 and "/source." in item["Key"]
                 and not item["Key"].endswith("/manifest.json")
             )
+        )
+    return sorted(set(uris))
+
+
+def _list_legacy_full_statement_uris(bucket: str) -> list[str]:
+    """List reusable list-shaped responses written by the older collector."""
+    client = boto3.client("s3")
+    pattern = re.compile(
+        r"financials/dart_full/year=\d{4}/corp=[0-9A-Z]{6}/"
+        r"(?:11011|11012|11013|11014)-(?:CFS|OFS)\.json$"
+    )
+    uris: list[str] = []
+    for page in client.get_paginator("list_objects_v2").paginate(
+        Bucket=bucket, Prefix="financials/dart_full/",
+    ):
+        uris.extend(
+            f"s3://{bucket}/{item['Key']}"
+            for item in page.get("Contents", [])
+            if pattern.search(item["Key"])
         )
     return sorted(set(uris))
 
@@ -83,7 +103,10 @@ def publish_existing() -> dict:
     bucket = os.environ.get("S3_BRONZE_BUCKET")
     if not bucket:
         raise SystemExit("S3_BRONZE_BUCKET is required")
-    full_files = _list_response_uris(bucket, "financials/dart_statement_lines/")
+    full_files = sorted(set(
+        _list_response_uris(bucket, "financials/dart_statement_lines/")
+        + _list_legacy_full_statement_uris(bucket)
+    ))
     ownership_files = _list_response_uris(bucket, "ownership/dart/")
     investor_files = _list_response_uris(bucket, "investor_flows/krx/")
     industry_files = _list_response_uris(bucket, "company_profiles/dart/")
