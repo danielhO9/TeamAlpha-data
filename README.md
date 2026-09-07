@@ -216,6 +216,11 @@ investor_flows/krx/
     source.csv
     manifest.json  # 구매·활용승인 ID 및 SHA-256
 
+market_flows/kis/
+  dataset=<investor-flow|short-sale>/ticker=<종목코드>/sha256=<응답해시>/
+    response.json  # KIS REST 응답 byte-for-byte
+    manifest.json  # endpoint·요청범위·취득시각·행수·기간·단위, secret 제외
+
 short_balances/krx/
   sha256=<원문해시>/
     source.csv
@@ -611,6 +616,12 @@ uv run python -m pipeline.bronze.krx_investor_flows \
   --source-file ./authorized.csv --authorization-id <계약식별자> --dest s3
 uv run python -m pipeline.bronze.krx_short_balances \
   --source-file ./authorized-short.csv --authorization-id <계약식별자> --dest s3
+# 본인 KIS Open API 계정의 기본 제공 API로 실제 종목별 수급/공매도 거래흐름 수집.
+# 투자자 수급 금액 단위는 백만원, 공매도 금액 단위는 원이다.
+uv run python -m pipeline.bronze.kis_market_flows \
+  --dataset investor-flow --tickers 005930 --as-of 20250812 --dest local
+uv run python -m pipeline.bronze.kis_market_flows \
+  --dataset short-sale --tickers 005930 --from 20240301 --to 20240328 --dest local
 # 운영 S3 기업행사 직접 publication은 금지됩니다. pipeline.daily_full의
 # fail-closed invalidation -> recertification 경로만 사용합니다.
 uv run python -m pipeline.bronze.dividends --from 2015 --to 2026 --dest s3 --reports annual
@@ -644,6 +655,13 @@ uv run python -m pipeline.alternative_data_backfill_ecs \
 
 OpenDART 수집은 content-addressed pointer로 재개된다. 투자자수급·공매도 수집기는
 KRX 웹페이지를 스크레이핑하지 않으며 승인 원본과 취득근거가 없으면 fail-closed한다.
+KIS 경로는 한국투자증권 공식 API 응답을 `KIS_SECURITIES_OPEN_API` 출처로 보존하며
+KRX 직접 수집이나 공매도 잔고로 표시하지 않는다. KIS 공식 FAQ상 기본서비스 유량은
+0원이고 기본서비스 과금 계획은 없지만, 본인 계좌의 Open API 신청과
+`KIS_APP_KEY`/`KIS_APP_SECRET` 발급은 필요하다. 무료 API가 전종목 전기간 이력을
+보장한다는 뜻은 아니므로, 실제 키로 표본 호출해 측정한 응답 기간까지만 coverage로
+인증한다. 현재 KIS 수집기는 먼저 Bronze 원문과 실측 coverage를 고정하며, 응답 형태와
+기간을 실제 검증하기 전에는 Silver 백필 완료로 간주하지 않는다.
 현재 DART 업종과 오늘 받은 과거 공매도 파일은 최초 관측시각 이전으로 소급하지 않는다.
 초기 적재가 끝난 뒤 정기 `pipeline.daily_full`은 정기보고서가 접수된 회사의 전체
 재무제표 scope, 지분공시가 접수된 회사의 해당 ownership endpoint, 아직 publication

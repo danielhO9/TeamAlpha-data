@@ -9,6 +9,7 @@ from pipeline.bronze import (
     dart_company_profiles,
     dart_full_statements,
     dart_ownership,
+    kis_market_flows,
     krx_investor_flows,
     krx_short_balances,
 )
@@ -281,3 +282,135 @@ def test_short_balance_export_requires_market_and_balance_fields():
     }]).to_csv(index=False).encode("utf-8")
     with pytest.raises(ValueError, match="market"):
         krx_short_balances.validate_export(missing_market, ".csv")
+
+
+class _KisResponse:
+    def __init__(self, payload: dict, *, headers: dict | None = None):
+        self._payload = payload
+        self.content = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.status_code = 200
+        self.headers = headers or {"content-type": "application/json"}
+
+    def json(self):
+        return self._payload
+
+
+class _KisSession:
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.calls = []
+
+    def get(self, url, *, headers, params, timeout):
+        self.calls.append((url, headers, params, timeout))
+        return _KisResponse(self.payload, headers={"tr_cont": ""})
+
+
+def test_kis_investor_flow_preserves_real_response_and_provenance(
+    tmp_path: Path, monkeypatch,
+):
+    monkeypatch.setenv("KIS_APP_KEY", "test-app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "test-app-secret")
+    monkeypatch.setattr(kis_market_flows, "base_uri", lambda _: str(tmp_path))
+    payload = {
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "output1": {},
+        "output2": [{
+            "stck_bsop_date": "20250812",
+            "frgn_ntby_qty": "123",
+            "orgn_ntby_qty": "-45",
+            "prsn_ntby_qty": "-78",
+        }],
+    }
+    session = _KisSession(payload)
+
+    result = kis_market_flows.collect_investor_flow(
+        "005930", "20250812", "local",
+        session=session, access_token="test-token",
+    )
+
+    response_path = Path(result["uri"])
+    manifest = json.loads(response_path.with_name("manifest.json").read_text())
+    assert response_path.read_bytes() == _KisResponse(payload).content
+    assert manifest["source"] == "KIS_SECURITIES_OPEN_API"
+    assert manifest["coverage"]["row_count"] == 1
+    assert manifest["coverage"]["asset_count"] == 1
+    assert manifest["coverage"]["date_min"] == "20250812"
+    assert manifest["coverage"]["categories"] == [
+        "foreign", "individual", "institution_total",
+    ]
+    assert manifest["pagination"]["response_complete"] is True
+    assert manifest["availability_contract"]["row_level_available_at"] == (
+        "not_supplied_by_endpoint"
+    )
+    assert "test-app-key" not in json.dumps(manifest)
+    assert "test-app-secret" not in json.dumps(manifest)
+    assert "test-token" not in json.dumps(manifest)
+    assert session.calls[0][2]["FID_INPUT_ISCD"] == "005930"
+    frozen_manifest = response_path.with_name("manifest.json").read_bytes()
+    repeated = kis_market_flows.collect_investor_flow(
+        "005930", "20250812", "local",
+        session=session, access_token="test-token",
+    )
+    assert repeated["uri"] == result["uri"]
+    assert response_path.with_name("manifest.json").read_bytes() == frozen_manifest
+
+
+def test_kis_short_sale_is_distinct_from_short_balance(
+    tmp_path: Path, monkeypatch,
+):
+    monkeypatch.setenv("KIS_APP_KEY", "test-app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "test-app-secret")
+    monkeypatch.setattr(kis_market_flows, "base_uri", lambda _: str(tmp_path))
+    payload = {
+        "rt_cd": "0",
+        "msg_cd": "MCA00000",
+        "output1": {},
+        "output2": [{
+            "stck_bsop_date": "20240328",
+            "ssts_cntg_qty": "100",
+            "ssts_vol_rlim": "1.25",
+            "ssts_tr_pbmn": "7654321",
+        }],
+    }
+
+    result = kis_market_flows.collect_short_sale(
+        "005930", "20240301", "20240328", "local",
+        session=_KisSession(payload), access_token="test-token",
+    )
+
+    manifest = json.loads(Path(result["uri"]).with_name("manifest.json").read_text())
+    assert manifest["dataset"] == "short-sale"
+    assert manifest["units"]["ratio"] == "percent"
+    assert "not short balance" in manifest["semantic_note"]
+
+
+def test_kis_collector_fails_closed_without_credentials(monkeypatch):
+    monkeypatch.delenv("KIS_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
+    with pytest.raises(RuntimeError, match="KIS_APP_KEY is required"):
+        kis_market_flows.issue_token(_KisSession({}))
+
+
+def test_kis_short_sale_run_reuses_one_token(monkeypatch):
+    calls = []
+    monkeypatch.setattr(kis_market_flows, "issue_token", lambda _: "one-token")
+    monkeypatch.setattr(
+        kis_market_flows,
+        "collect_short_sale",
+        lambda ticker, from_date, to_date, dest, *, session, access_token: (
+            calls.append((ticker, from_date, to_date, dest, access_token))
+            or {"ticker": ticker}
+        ),
+    )
+
+    results = kis_market_flows.run(
+        dataset="short-sale",
+        tickers=["005930"],
+        dest="local",
+        from_date="20240301",
+        to_date="20240328",
+    )
+
+    assert results == [{"ticker": "005930"}]
+    assert calls == [("005930", "20240301", "20240328", "local", "one-token")]
