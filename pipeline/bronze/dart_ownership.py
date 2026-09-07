@@ -12,6 +12,7 @@ import json
 import os
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import requests
@@ -31,6 +32,8 @@ ENDPOINTS = {
     ),
 }
 DISCLOSURE_LIST_URL = "https://opendart.fss.or.kr/api/list.json"
+COLLECT_WORKERS = 4
+WORK_CHUNK_SIZE = 100
 
 
 class DartOwnershipRequestError(RuntimeError):
@@ -244,60 +247,66 @@ def run(
         f"types={len(disclosure_types)} requests={total} dest={dest}",
         flush=True,
     )
-    responses: list[str] = []
-    fetched = skipped = 0
-    index = 0
-    for corp_code, ticker in corps:
-        for disclosure_type in disclosure_types:
-            index += 1
-            endpoint_name, endpoint_url = ENDPOINTS[disclosure_type]
-            root = (
-                f"{base}/ownership/dart/disclosure_type={disclosure_type}/"
-                f"corp={ticker}"
-            )
-            pointer_uri = f"{root}/latest.json"
-            previous = _existing_response(pointer_uri)
-            if not refresh_existing:
-                if previous is not None:
-                    if not changed_only:
-                        responses.append(previous)
-                    skipped += 1
-                    continue
-            body, payload = _request_all(endpoint_name, endpoint_url, corp_code)
-            digest = hashlib.sha256(body).hexdigest()
-            response_uri = f"{root}/sha256={digest}/response.json"
-            if previous == response_uri:
-                if not changed_only:
-                    responses.append(previous)
-                skipped += 1
-                time.sleep(financials.CALL_GAP_SEC)
-                continue
-            write_bytes(body, response_uri)
-            pointer = {
-                "schema_version": "dart-ownership-pointer-v1",
-                "ticker": ticker,
-                "corp_code": corp_code,
-                "disclosure_type": disclosure_type,
-                "endpoint": endpoint_name,
-                "status": str(payload.get("status") or "?"),
-                "row_count": len(payload.get("list") or []),
-                "sha256": digest,
-                "response_uri": response_uri,
-                "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            }
-            write_text_if_changed(
-                json.dumps(pointer, ensure_ascii=False, sort_keys=True),
-                pointer_uri,
-            )
-            responses.append(response_uri)
-            fetched += 1
-            if index % 100 == 0 or index == total:
-                print(
-                    f"[dart-ownership] {index}/{total} "
-                    f"fetched={fetched} skipped={skipped}",
-                    flush=True,
-                )
+    work = [
+        (corp_code, ticker, disclosure_type)
+        for corp_code, ticker in corps
+        for disclosure_type in disclosure_types
+    ]
+
+    def collect_one(item: tuple[str, str, str]) -> tuple[str | None, bool]:
+        corp_code, ticker, disclosure_type = item
+        endpoint_name, endpoint_url = ENDPOINTS[disclosure_type]
+        root = (
+            f"{base}/ownership/dart/disclosure_type={disclosure_type}/"
+            f"corp={ticker}"
+        )
+        pointer_uri = f"{root}/latest.json"
+        previous = _existing_response(pointer_uri)
+        if not refresh_existing and previous is not None:
+            return (None if changed_only else previous), False
+        body, payload = _request_all(endpoint_name, endpoint_url, corp_code)
+        digest = hashlib.sha256(body).hexdigest()
+        response_uri = f"{root}/sha256={digest}/response.json"
+        if previous == response_uri:
             time.sleep(financials.CALL_GAP_SEC)
+            return (None if changed_only else previous), False
+        write_bytes(body, response_uri)
+        pointer = {
+            "schema_version": "dart-ownership-pointer-v1",
+            "ticker": ticker,
+            "corp_code": corp_code,
+            "disclosure_type": disclosure_type,
+            "endpoint": endpoint_name,
+            "status": str(payload.get("status") or "?"),
+            "row_count": len(payload.get("list") or []),
+            "sha256": digest,
+            "response_uri": response_uri,
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        write_text_if_changed(
+            json.dumps(pointer, ensure_ascii=False, sort_keys=True), pointer_uri,
+        )
+        time.sleep(financials.CALL_GAP_SEC)
+        return response_uri, True
+
+    responses: list[str] = []
+    fetched = skipped = completed = 0
+    for offset in range(0, len(work), WORK_CHUNK_SIZE):
+        chunk = work[offset:offset + WORK_CHUNK_SIZE]
+        with ThreadPoolExecutor(max_workers=COLLECT_WORKERS) as executor:
+            for response_uri, changed in executor.map(collect_one, chunk):
+                completed += 1
+                if response_uri is not None:
+                    responses.append(response_uri)
+                if changed:
+                    fetched += 1
+                else:
+                    skipped += 1
+        print(
+            f"[dart-ownership] {completed}/{total} "
+            f"fetched={fetched} skipped={skipped}",
+            flush=True,
+        )
     return sorted(set(responses))
 
 
