@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,27 +85,55 @@ def discover_scopes(
     to_year: int,
 ) -> list[tuple[str, int, str, str]]:
     """Return deterministic ticker/year/report/fs_type scopes with real filings."""
-    scopes: set[tuple[str, int, str, str]] = set()
-    for uri in _list_major_uris(base, from_year, to_year):
-        match = _MAJOR_KEY_RE.search(uri.replace("\\", "/"))
-        if match is None:
-            continue
-        raw = read_bytes(uri)
+    uris = _list_major_uris(base, from_year, to_year)
+    s3 = None
+    if base.startswith("s3://"):
+        import boto3
+        from botocore.config import Config
+
+        s3 = boto3.client("s3", config=Config(max_pool_connections=32))
+
+    def read_rows(uri: str) -> tuple[str, list]:
+        if s3 is None:
+            raw = read_bytes(uri)
+        else:
+            without = uri.removeprefix("s3://")
+            bucket, _, key = without.partition("/")
+            raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         if raw is None:
             raise RuntimeError(f"Bronze object disappeared while listing: {uri}")
         rows = json.loads(raw.decode("utf-8"))
-        fs_types = {
-            str(row.get("fs_div") or "").strip()
-            for row in rows
-            if str(row.get("fs_div") or "").strip() in {"CFS", "OFS"}
-        }
-        for fs_type in fs_types:
-            scopes.add((
-                match.group("ticker"),
-                int(match.group("year")),
-                match.group("report"),
-                fs_type,
-            ))
+        if not isinstance(rows, list):
+            raise RuntimeError(f"invalid major-account Bronze object: {uri}")
+        return uri, rows
+
+    scopes: set[tuple[str, int, str, str]] = set()
+    if s3 is None:
+        loaded = map(read_rows, uris)
+    else:
+        executor = ThreadPoolExecutor(max_workers=32)
+        loaded = executor.map(read_rows, uris)
+    try:
+        for uri, rows in loaded:
+            match = _MAJOR_KEY_RE.search(uri.replace("\\", "/"))
+            if match is None:
+                continue
+            fs_types = {
+                str(row.get("fs_div") or "").strip()
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("fs_div") or "").strip() in {"CFS", "OFS"}
+            }
+            for fs_type in fs_types:
+                scopes.add((
+                    match.group("ticker"),
+                    int(match.group("year")),
+                    match.group("report"),
+                    fs_type,
+                ))
+    finally:
+        if s3 is not None:
+            executor.shutdown()
     return sorted(scopes)
 
 
@@ -271,7 +300,13 @@ def _promote_legacy_response(
     return response_uri
 
 
-def _existing_response(pointer_uri: str) -> str | None:
+def _existing_response(
+    pointer_uri: str,
+    *,
+    known_objects: set[str] | None = None,
+) -> str | None:
+    if known_objects is not None and pointer_uri not in known_objects:
+        return None
     raw = read_bytes(pointer_uri)
     if raw is None:
         return None
@@ -279,11 +314,76 @@ def _existing_response(pointer_uri: str) -> str | None:
     response_uri = pointer.get("response_uri")
     if not isinstance(response_uri, str) or not response_uri:
         raise RuntimeError(f"invalid full-statement pointer: {pointer_uri}")
-    if not exists(response_uri):
+    target_exists = (
+        response_uri in known_objects
+        if known_objects is not None
+        else exists(response_uri)
+    )
+    if not target_exists:
         raise RuntimeError(
             f"full-statement pointer target is missing: {response_uri}"
         )
     return response_uri
+
+
+def _s3_inventory(base: str) -> set[str]:
+    """List relevant initial-load objects once instead of issuing per-scope HEADs."""
+    if not base.startswith("s3://"):
+        return set()
+    import boto3
+
+    without = base.removeprefix("s3://")
+    bucket, _, root_prefix = without.partition("/")
+    root_prefix = root_prefix.rstrip("/")
+    prefix_root = f"{root_prefix}/" if root_prefix else ""
+    client = boto3.client("s3")
+    uris: set[str] = set()
+    for relative in (
+        "financials/dart_statement_lines/",
+        "financials/dart_full/",
+    ):
+        prefix = f"{prefix_root}{relative}"
+        for page in client.get_paginator("list_objects_v2").paginate(
+            Bucket=bucket, Prefix=prefix,
+        ):
+            uris.update(
+                f"s3://{bucket}/{obj['Key']}"
+                for obj in page.get("Contents", [])
+                if not obj["Key"].endswith("/")
+            )
+    return uris
+
+
+def _load_existing_responses(
+    base: str,
+    scopes: list[tuple[str, int, str, str]],
+    known_objects: set[str],
+) -> dict[str, str]:
+    """Read existing scope pointers concurrently during a large initial run."""
+    import boto3
+    from botocore.config import Config
+
+    pointers = [
+        f"{_scope_root(base, ticker, year, report, fs_type)}/latest.json"
+        for ticker, year, report, fs_type in scopes
+    ]
+    pointers = [uri for uri in pointers if uri in known_objects]
+    if not pointers:
+        return {}
+    client = boto3.client("s3", config=Config(max_pool_connections=32))
+
+    def load(pointer_uri: str) -> tuple[str, str]:
+        without = pointer_uri.removeprefix("s3://")
+        bucket, _, key = without.partition("/")
+        raw = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        pointer = json.loads(raw.decode("utf-8"))
+        response_uri = pointer.get("response_uri")
+        if not isinstance(response_uri, str) or response_uri not in known_objects:
+            raise RuntimeError(f"invalid full-statement pointer: {pointer_uri}")
+        return pointer_uri, response_uri
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        return dict(executor.map(load, pointers))
 
 
 def _collect_scopes(
@@ -294,6 +394,12 @@ def _collect_scopes(
     refresh_existing: bool,
     changed_only: bool,
 ) -> list[str]:
+    known_objects = _s3_inventory(base) if len(scopes) > 100 else None
+    existing_responses = (
+        _load_existing_responses(base, scopes, known_objects)
+        if known_objects is not None
+        else {}
+    )
     corp_by_stock: dict[str, str] | None = None
     print(
         f"[dart-full-statements] scopes={len(scopes)} "
@@ -305,16 +411,26 @@ def _collect_scopes(
     for index, (ticker, year, report_code, fs_type) in enumerate(scopes, 1):
         root = _scope_root(base, ticker, year, report_code, fs_type)
         pointer_uri = f"{root}/latest.json"
-        previous = _existing_response(pointer_uri)
+        previous = (
+            existing_responses.get(pointer_uri)
+            if known_objects is not None
+            else _existing_response(pointer_uri)
+        )
         if not refresh_existing:
             if previous is not None:
                 if not changed_only:
                     responses.append(previous)
                 skipped += 1
                 continue
-            promoted = _promote_legacy_response(
-                base, ticker, year, report_code, fs_type,
+            legacy_uri = (
+                f"{base}/financials/dart_full/year={year}/corp={ticker}/"
+                f"{report_code}-{fs_type}.json"
             )
+            promoted = None
+            if known_objects is None or legacy_uri in known_objects:
+                promoted = _promote_legacy_response(
+                    base, ticker, year, report_code, fs_type,
+                )
             if promoted is not None:
                 responses.append(promoted)
                 reused_legacy += 1
