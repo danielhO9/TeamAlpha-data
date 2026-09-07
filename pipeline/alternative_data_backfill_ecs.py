@@ -7,12 +7,13 @@ export를 Bronze에 등록한 뒤 ``silver`` phase에서만 적재한다.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 
 import boto3
 
-from pipeline import alternative_data_incremental
+from pipeline import alternative_data_incremental, dart_silver_backfill_ecs
 from pipeline.bronze import (
     dart_company_profiles,
     dart_full_statements,
@@ -134,6 +135,44 @@ def publish_existing() -> dict:
     return summary
 
 
+def publish_full_statement_batch(
+    from_year: int,
+    to_year: int,
+    *,
+    max_scopes: int,
+) -> dict:
+    """Collect and certify one bounded, recent-first initial-load batch."""
+    lock = dart_silver_backfill_ecs.acquire_daily_certification_lock()
+    try:
+        migrate.assert_current(lock)
+        files, remaining = dart_full_statements.run_bootstrap_batch(
+            from_year,
+            to_year,
+            "s3",
+            max_scopes=max_scopes,
+        )
+        published = {}
+        if files:
+            summary = alternative_data.publish_files(
+                full_statement_files=files,
+                conn=lock,
+            )
+            published = summary["published"]
+        result = {
+            "selected_scopes": len(files),
+            "remaining_scopes": remaining,
+            "published": published,
+        }
+        print(
+            "[alternative-full-bootstrap] "
+            + json.dumps(result, sort_keys=True),
+            flush=True,
+        )
+        return result
+    finally:
+        dart_silver_backfill_ecs.release_daily_certification_lock(lock)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -142,6 +181,7 @@ def parse_args() -> argparse.Namespace:
             "bronze-full",
             "bronze-ownership",
             "bronze-industry",
+            "full-statement-batch",
             "silver",
             "full",
         ),
@@ -158,6 +198,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     to_year = args.to_year or args.from_year
+    if args.phase == "full-statement-batch":
+        publish_full_statement_batch(
+            args.from_year,
+            to_year,
+            max_scopes=args.max_scopes or 4000,
+        )
+        return
     if args.phase in {"bronze-full", "full"}:
         collect_full_statements(
             args.from_year,

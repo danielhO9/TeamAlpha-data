@@ -121,6 +121,32 @@ def test_full_statement_incremental_discovers_only_explicit_changed_files(
     ]
 
 
+def test_full_statement_bootstrap_selects_recent_pending_scopes(monkeypatch):
+    scopes = [
+        ("005930", 2024, "11011", "CFS"),
+        ("000660", 2026, "11012", "CFS"),
+        ("035420", 2025, "11014", "OFS"),
+    ]
+    monkeypatch.setattr(
+        dart_full_statements, "discover_scopes", lambda *_args: scopes,
+    )
+    monkeypatch.setattr(dart_full_statements, "_s3_inventory", lambda _base: set())
+    captured = {}
+
+    def collect(base, selected, **kwargs):
+        captured["scopes"] = selected
+        return ["one.json", "two.json"]
+
+    monkeypatch.setattr(dart_full_statements, "_collect_scopes", collect)
+    files, remaining = dart_full_statements.run_bootstrap_batch(
+        2015, 2026, "local", max_scopes=2,
+    )
+
+    assert captured["scopes"] == [scopes[1], scopes[2]]
+    assert files == ["one.json", "two.json"]
+    assert remaining == 1
+
+
 def test_ownership_snapshot_fetches_every_page(monkeypatch):
     calls: list[int] = []
 

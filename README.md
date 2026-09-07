@@ -637,6 +637,9 @@ RDS transaction을 순차 실행한다.
 uv run python -m pipeline.alternative_data_backfill_ecs \
   --phase full --from 2015 --to 2026
 uv run python -m pipeline.alternative_data_backfill_ecs --phase silver
+# 대규모 전체 재무 원문은 최근 연도부터 4,000 scope씩 수집·인증
+uv run python -m pipeline.alternative_data_backfill_ecs \
+  --phase full-statement-batch --from 2015 --to 2026 --max-scopes 4000
 ```
 
 OpenDART 수집은 content-addressed pointer로 재개된다. 투자자수급·공매도 수집기는

@@ -393,8 +393,10 @@ def _collect_scopes(
     dest: str,
     refresh_existing: bool,
     changed_only: bool,
+    known_objects: set[str] | None = None,
 ) -> list[str]:
-    known_objects = _s3_inventory(base) if len(scopes) > 100 else None
+    if known_objects is None and len(scopes) > 100:
+        known_objects = _s3_inventory(base)
     existing_responses = (
         _load_existing_responses(base, scopes, known_objects)
         if known_objects is not None
@@ -549,6 +551,45 @@ def run_incremental_day(day: str, dest: str) -> list[str]:
                 if exists(uri):
                     major_files.add(uri)
     return run_incremental(sorted(major_files), dest)
+
+
+def run_bootstrap_batch(
+    from_year: int,
+    to_year: int,
+    dest: str,
+    *,
+    max_scopes: int,
+) -> tuple[list[str], int]:
+    """Collect a recent-first bounded batch and return remaining scope count."""
+    if max_scopes < 1:
+        raise ValueError("max_scopes must be positive")
+    if from_year < 2015 or to_year < from_year:
+        raise ValueError("OpenDART full statements require 2015 <= from_year <= to_year")
+    base = base_uri(dest)
+    scopes = sorted(
+        discover_scopes(base, from_year, to_year),
+        key=lambda value: (-value[1], value[0], value[2], value[3]),
+    )
+    known_objects = _s3_inventory(base)
+    pending = [
+        scope for scope in scopes
+        if f"{_scope_root(base, *scope)}/latest.json" not in known_objects
+    ]
+    selected = pending[:max_scopes]
+    print(
+        f"[dart-full-bootstrap] total={len(scopes)} pending={len(pending)} "
+        f"selected={len(selected)}",
+        flush=True,
+    )
+    responses = _collect_scopes(
+        base,
+        selected,
+        dest=dest,
+        refresh_existing=False,
+        changed_only=False,
+        known_objects=known_objects,
+    )
+    return responses, max(0, len(pending) - len(selected))
 
 
 def main() -> None:
