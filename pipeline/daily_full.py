@@ -217,20 +217,56 @@ def _main_locked(
 
     print(f"[daily] start day={day}", flush=True)
     migrate.assert_current()
-    if (
-        repository.certified_target_exists(
-            certification_lock, "daily", coverage_end,
-        )
-        and dart_silver_backfill_ecs.total_return_contract_ready(
+    daily_already_certified = repository.certified_target_exists(
+        certification_lock, "daily", coverage_end,
+    )
+    total_return_ready = (
+        dart_silver_backfill_ecs.total_return_contract_ready(
             conn=certification_lock,
         )
-    ):
+        if daily_already_certified else False
+    )
+    if daily_already_certified and total_return_ready:
         print(
             f"[daily] KRX/DART already certified day={day}; "
             "skipping source collection, matching, and total-return rebuild",
             flush=True,
         )
         if collect_alternative:
+            alternative_data_incremental.run(day, conn=certification_lock)
+        _run_fmp_incremental(
+            bucket, root, day, certification_lock=certification_lock,
+        )
+        if assert_final_freshness:
+            fr = freshness.assert_fresh()
+            print(f"[freshness] ok {fr['sources']}", flush=True)
+        else:
+            print(f"[freshness] deferred after gap day={day}", flush=True)
+        return
+    if daily_already_certified:
+        # A stopped/crashed invocation may have committed the daily source
+        # transaction while leaving the total-return contract BUILDING.  The
+        # immutable action snapshot was published before that transaction, so
+        # restore it directly and finish the contract without repeating KRX or
+        # OpenDART collection, evidence crawling, or snapshot generation.
+        print(
+            f"[daily] certified day={day} with unfinished total-return; "
+            "starting retry-only repair",
+            flush=True,
+        )
+        dart_silver_backfill_ecs.restore_published_total_return_snapshot(
+            coverage_end,
+            bucket=bucket,
+            root=root,
+        )
+        assert_epoch()
+        dart_silver_backfill_ecs.close_total_return_contract(
+            coverage_end,
+            root=root,
+            certification_lock=certification_lock,
+        )
+        if collect_alternative:
+            assert_epoch()
             alternative_data_incremental.run(day, conn=certification_lock)
         _run_fmp_incremental(
             bucket, root, day, certification_lock=certification_lock,
