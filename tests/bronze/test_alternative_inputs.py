@@ -285,10 +285,12 @@ def test_short_balance_export_requires_market_and_balance_fields():
 
 
 class _KisResponse:
-    def __init__(self, payload: dict, *, headers: dict | None = None):
+    def __init__(
+        self, payload: dict, *, headers: dict | None = None, status_code: int = 200,
+    ):
         self._payload = payload
         self.content = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.status_code = 200
+        self.status_code = status_code
         self.headers = headers or {"content-type": "application/json"}
 
     def json(self):
@@ -303,6 +305,16 @@ class _KisSession:
     def get(self, url, *, headers, params, timeout):
         self.calls.append((url, headers, params, timeout))
         return _KisResponse(self.payload, headers={"tr_cont": ""})
+
+
+class _KisSequenceSession:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = []
+
+    def get(self, url, *, headers, params, timeout):
+        self.calls.append((url, headers, params, timeout))
+        return next(self.responses)
 
 
 def test_kis_investor_flow_preserves_real_response_and_provenance(
@@ -414,3 +426,32 @@ def test_kis_short_sale_run_reuses_one_token(monkeypatch):
 
     assert results == [{"ticker": "005930"}]
     assert calls == [("005930", "20240301", "20240328", "local", "one-token")]
+
+
+def test_kis_request_retries_documented_rate_limit_without_leaking_secret(
+    monkeypatch,
+):
+    monkeypatch.setenv("KIS_APP_KEY", "test-app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "test-app-secret")
+    sleeps = []
+    monkeypatch.setattr(kis_market_flows.time, "sleep", sleeps.append)
+    session = _KisSequenceSession([
+        _KisResponse(
+            {"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "rate limit"},
+            status_code=500,
+        ),
+        _KisResponse({"rt_cd": "0", "output2": []}),
+    ])
+
+    raw, payload, _ = kis_market_flows._request(
+        session=session,
+        access_token="test-token",
+        path=kis_market_flows.SHORT_SALE_PATH,
+        tr_id=kis_market_flows.SHORT_SALE_TR_ID,
+        params={"FID_INPUT_ISCD": "005930"},
+    )
+
+    assert payload["rt_cd"] == "0"
+    assert json.loads(raw)["rt_cd"] == "0"
+    assert len(session.calls) == 2
+    assert sleeps == [kis_market_flows.REQUEST_INTERVAL_SECONDS]

@@ -37,6 +37,8 @@ SHORT_SALE_PATH = "/uapi/domestic-stock/v1/quotations/daily-short-sale"
 INVESTOR_TR_ID = "FHPTJ04160001"
 SHORT_SALE_TR_ID = "FHPST04830000"
 SOURCE = "KIS_SECURITIES_OPEN_API"
+REQUEST_INTERVAL_SECONDS = 1.0
+RATE_LIMIT_RETRIES = 3
 SOURCE_REFERENCES = {
     "investor-flow": (
         "https://github.com/koreainvestment/open-trading-api/blob/main/"
@@ -130,28 +132,36 @@ def _request(
 ) -> tuple[bytes, dict[str, Any], dict[str, str]]:
     appkey = _credential("KIS_APP_KEY")
     appsecret = _credential("KIS_APP_SECRET")
-    response = session.get(
-        f"{API_ROOT}{path}",
-        headers={
-            "Content-Type": "application/json; charset=UTF-8",
-            "authorization": f"Bearer {access_token}",
-            "appkey": appkey,
-            "appsecret": appsecret,
-            "tr_id": tr_id,
-            "custtype": "P",
-            "tr_cont": "",
-        },
-        params=params,
-        timeout=30,
-    )
-    raw = response.content
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError(
-            f"KIS data response is not JSON: status={response.status_code}"
-        ) from exc
-    if response.status_code != 200 or str(payload.get("rt_cd")) != "0":
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        response = session.get(
+            f"{API_ROOT}{path}",
+            headers={
+                "Content-Type": "application/json; charset=UTF-8",
+                "authorization": f"Bearer {access_token}",
+                "appkey": appkey,
+                "appsecret": appsecret,
+                "tr_id": tr_id,
+                "custtype": "P",
+                "tr_cont": "",
+            },
+            params=params,
+            timeout=30,
+        )
+        raw = response.content
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"KIS data response is not JSON: status={response.status_code}"
+            ) from exc
+        if response.status_code == 200 and str(payload.get("rt_cd")) == "0":
+            break
+        if (
+            payload.get("msg_cd") == "EGW00201"
+            and attempt < RATE_LIMIT_RETRIES
+        ):
+            time.sleep(REQUEST_INTERVAL_SECONDS * (attempt + 1))
+            continue
         raise RuntimeError(
             "KIS data request failed: "
             f"status={response.status_code}, code={payload.get('msg_cd')}, "
@@ -403,7 +413,7 @@ def run(
             flush=True,
         )
         if index + 1 < len(tickers):
-            time.sleep(0.2)
+            time.sleep(REQUEST_INTERVAL_SECONDS)
     return results
 
 
