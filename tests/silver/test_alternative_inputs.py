@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from pipeline.silver import (
+    alternative_data,
     full_statements,
     industry_classifications,
     investor_flows,
@@ -217,6 +218,38 @@ def test_industry_observation_is_not_backdated(tmp_path: Path):
     assert frame.iloc[0]["industry_code"] == "264"
     assert frame.iloc[0]["effective_from"] is None
     assert frame.iloc[0]["available_at"].isoformat() == "2026-09-03T12:00:00+00:00"
+
+
+def test_dart_rows_outside_krx_asset_universe_are_counted_and_excluded():
+    frames = {
+        "ownership_disclosure_event": pd.DataFrame({
+            "natural_key": ["00126380", "01022054", "00126380"],
+            "value": [1, 2, 3],
+        }),
+        "industry_classification_observation": pd.DataFrame({
+            "natural_key": ["00970277", "00126380"],
+            "value": [4, 5],
+        }),
+    }
+    stats = {
+        name: {
+            "input_rows": len(frame),
+            "transformed_rows": len(frame),
+            "excluded_rows": 0,
+        }
+        for name, frame in frames.items()
+    }
+
+    excluded_rows, excluded_keys = alternative_data._exclude_unmapped_corp_rows(
+        frames, stats, {"00126380": 1},
+    )
+
+    assert excluded_rows == 2
+    assert excluded_keys == ["00970277", "01022054"]
+    assert frames["ownership_disclosure_event"]["value"].tolist() == [1, 3]
+    assert frames["industry_classification_observation"]["value"].tolist() == [5]
+    assert stats["ownership_disclosure_event"]["unmapped_asset_rows"] == 1
+    assert stats["industry_classification_observation"]["excluded_rows"] == 1
 
 
 def test_short_balance_uses_first_observed_vintage(tmp_path: Path):

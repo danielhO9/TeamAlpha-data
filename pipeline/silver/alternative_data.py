@@ -1,8 +1,9 @@
 """전체 재무·지분공시·승인된 투자자수급을 원자적으로 Silver에 적재한다.
 
-각 Bronze 원문은 먼저 메모리 후보로 변환한다. 모든 자연키가 기존 Silver 자산에
-정확히 매핑되고 입력 계약을 통과한 경우에만 요청 데이터셋을 한 transaction으로
-upsert한다. 하나라도 실패하면 이번 run의 변경 전체를 rollback한다.
+각 Bronze 원문은 먼저 메모리 후보로 변환한다. KRX 티커 입력은 모든 자연키가
+기존 Silver 자산에 정확히 매핑돼야 한다. DART 회사코드 입력은 corpCode.xml의
+상장·상폐·KONEX 범위가 KOSPI·KOSDAQ Silver 유니버스보다 넓으므로, 범위 밖 행을
+명시적으로 계수·제외한 뒤 매핑 가능한 행을 한 transaction으로 upsert한다.
 """
 from __future__ import annotations
 
@@ -43,6 +44,7 @@ def _asset_map(
     *,
     source: str,
     identifier_type: str,
+    require_complete: bool = True,
 ) -> dict[str, int]:
     keys = sorted({str(value) for value in natural_keys})
     if not keys:
@@ -62,13 +64,46 @@ def _asset_map(
         rows = cur.fetchall()
     mapping = {str(identifier): int(asset_id) for identifier, asset_id in rows}
     missing = sorted(set(keys) - set(mapping))
-    if missing:
+    if missing and require_complete:
         raise RuntimeError(
             "Silver asset mapping is incomplete: "
             f"source={source}, identifier_type={identifier_type}, "
             f"missing_count={len(missing)}, sample={missing[:10]}"
         )
     return mapping
+
+
+def _exclude_unmapped_corp_rows(
+    frames: dict[str, pd.DataFrame],
+    stats: dict[str, dict],
+    mapping: dict[str, int],
+) -> tuple[int, list[str]]:
+    """Exclude DART rows outside the certified KOSPI/KOSDAQ universe."""
+    excluded_rows = 0
+    excluded_keys: set[str] = set()
+    for name in (
+        "ownership_disclosure_event",
+        "industry_classification_observation",
+    ):
+        frame = frames.get(name)
+        if frame is None or frame.empty:
+            continue
+        mapped = frame["natural_key"].astype(str).isin(mapping)
+        missing_frame = frame.loc[~mapped]
+        missing_count = len(missing_frame)
+        excluded_rows += missing_count
+        excluded_keys.update(missing_frame["natural_key"].astype(str))
+        frames[name] = frame.loc[mapped].reset_index(drop=True)
+        stats[name] = dict(stats[name])
+        stats[name]["unmapped_asset_rows"] = missing_count
+        stats[name]["unmapped_asset_keys"] = sorted(set(
+            missing_frame["natural_key"].astype(str)
+        ))
+        stats[name]["transformed_rows"] = len(frames[name])
+        stats[name]["excluded_rows"] = (
+            int(stats[name].get("excluded_rows", 0)) + missing_count
+        )
+    return excluded_rows, sorted(excluded_keys)
 
 
 def _result(
@@ -235,7 +270,28 @@ def publish_files(
             corp_keys,
             source="DART",
             identifier_type="corp_code",
+            require_complete=False,
         )
+        unmapped_corp_rows, unmapped_corp_keys = _exclude_unmapped_corp_rows(
+            frames, stats, corp_map,
+        )
+        results.append(CheckResult(
+            rule_code="ALTERNATIVE_DART_OUTSIDE_ASSET_UNIVERSE",
+            dataset="alternative_research_inputs",
+            severity=Severity.WARNING,
+            status=(
+                CheckStatus.FAIL if unmapped_corp_rows else CheckStatus.PASS
+            ),
+            expected="all publishable DART rows map to KOSPI/KOSDAQ assets",
+            actual=(
+                f"excluded_rows={unmapped_corp_rows}, "
+                f"excluded_corp_codes={len(unmapped_corp_keys)}"
+            ),
+            failed_count=unmapped_corp_rows,
+            samples=[
+                {"corp_code": value} for value in unmapped_corp_keys[:10]
+            ],
+        ))
         connection.commit()
 
         published = {
