@@ -252,6 +252,35 @@ def test_dart_rows_outside_krx_asset_universe_are_counted_and_excluded():
     assert stats["industry_classification_observation"]["excluded_rows"] == 1
 
 
+def test_historical_full_statement_rejections_warn_without_blocking_batch():
+    frames = {
+        "fundamental_statement_line": pd.DataFrame({"natural_key": ["005930"]}),
+    }
+    stats = {
+        "fundamental_statement_line": {
+            "file_count": 1,
+            "input_rows": 2,
+            "transformed_rows": 1,
+            "excluded_rows": 0,
+            "rejected_rows": 1,
+        },
+    }
+
+    results = alternative_data._transform_checks(
+        frames,
+        stats,
+        {"fundamental_statement_line": ["response.json"]},
+    )
+
+    rejected = next(
+        result for result in results
+        if result.rule_code == "ALTERNATIVE_INPUT_NO_REJECTED_ROWS"
+    )
+    assert rejected.severity == alternative_data.Severity.WARNING
+    assert rejected.status == alternative_data.CheckStatus.FAIL
+    assert not rejected.blocks_publish
+
+
 def test_short_balance_uses_first_observed_vintage(tmp_path: Path):
     source_frame = pd.DataFrame([{
         "일자": "2020-01-02",

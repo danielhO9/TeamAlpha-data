@@ -113,12 +113,13 @@ def _result(
     passed: bool,
     expected: str,
     actual: str,
+    severity: Severity = Severity.ERROR,
     samples: list[dict] | None = None,
 ) -> CheckResult:
     return CheckResult(
         rule_code=code,
         dataset=dataset,
-        severity=Severity.ERROR,
+        severity=severity,
         status=CheckStatus.PASS if passed else CheckStatus.FAIL,
         expected=expected,
         actual=actual,
@@ -150,6 +151,16 @@ def _transform_checks(
             passed=rejected == 0,
             expected="rejected_rows=0",
             actual=f"rejected_rows={rejected}",
+            # Some historical full-statement rows omit the exact fiscal-period
+            # end.  For non-calendar-year issuers the conservative fallback can
+            # then land after the filing date.  Keep those ambiguous rows out
+            # of Silver and record the loss, but do not block the valid rows in
+            # a multi-thousand-scope bootstrap batch.
+            severity=(
+                Severity.WARNING
+                if name == "fundamental_statement_line"
+                else Severity.ERROR
+            ),
         ))
         results.append(_result(
             code="ALTERNATIVE_INPUT_ROW_ACCOUNTING",
