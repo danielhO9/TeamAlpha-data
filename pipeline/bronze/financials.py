@@ -48,6 +48,7 @@ REPRT_CODES = ["11011", "11013", "11012", "11014"]  # 사업(FY)/1분기/반기/
 BATCH = 100          # 한 콜에 넣을 회사 수
 CALL_GAP_SEC = 0.3
 CORPCODE_BRONZE_PATH = "financials/dart/corpCode.xml"
+DEFERRED_REQUIREMENTS_PATH = "financials/dart_deferred/pending.json"
 MAJOR_ACCOUNT_NAMES = {
     "자산총계",
     "매출액",
@@ -268,6 +269,51 @@ def _incremental_disclosure_days(day: str) -> list[str]:
     return [value.strftime("%Y%m%d") for value in sorted(days)]
 
 
+def _load_deferred_requirements(
+    base: str,
+) -> set[tuple[str, int, tuple[str, ...]]]:
+    """Load periodic-report scopes that were filed before the API exposed them."""
+    raw = read_bytes(f"{base}/{DEFERRED_REQUIREMENTS_PATH}")
+    if raw is None:
+        return set()
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, list):
+        raise RuntimeError("invalid deferred financial requirement checkpoint")
+    requirements: set[tuple[str, int, tuple[str, ...]]] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            raise RuntimeError("invalid deferred financial requirement row")
+        corp_code = str(item.get("corp_code") or "").strip()
+        year = item.get("year")
+        report_codes = tuple(sorted({
+            str(value).strip() for value in item.get("report_codes", [])
+            if str(value).strip() in REPRT_CODES
+        }))
+        if not re.fullmatch(r"\d{8}", corp_code) or not isinstance(year, int) \
+                or not report_codes:
+            raise RuntimeError("invalid deferred financial requirement identity")
+        requirements.add((corp_code, year, report_codes))
+    return requirements
+
+
+def _save_deferred_requirements(
+    base: str,
+    requirements: list[tuple[str, int, list[str]]],
+) -> None:
+    payload = [
+        {
+            "corp_code": corp_code,
+            "year": year,
+            "report_codes": report_codes,
+        }
+        for corp_code, year, report_codes in requirements
+    ]
+    write_text_if_changed(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        f"{base}/{DEFERRED_REQUIREMENTS_PATH}",
+    )
+
+
 def run_incremental(day: str, dest: str) -> list[str]:
     """Refresh only companies that filed a periodic report on ``day``.
 
@@ -281,7 +327,10 @@ def run_incremental(day: str, dest: str) -> list[str]:
     corp_to_stock = dict(corps)
     stock_to_corp = {stock: corp for corp, stock in corps}
     groups: dict[tuple[int, str], set[str]] = defaultdict(set)
-    requirements: dict[tuple[str, int], set[str]] = defaultdict(set)
+    requirements = _load_deferred_requirements(base)
+    for corp_code, year, report_codes in requirements:
+        for report_code in report_codes:
+            groups[(year, report_code)].add(corp_code)
     disclosures = [
         row
         for disclosure_day in _incremental_disclosure_days(day)
@@ -295,9 +344,9 @@ def run_incremental(day: str, dest: str) -> list[str]:
         if scope is None:
             continue
         year, report_codes = scope
+        requirements.add((corp_code, year, tuple(sorted(report_codes))))
         for report_code in report_codes:
             groups[(year, report_code)].add(corp_code)
-            requirements[(corp_code, year)].add(report_code)
 
     print(
         f"[financials-incremental] day={day} disclosures={len(disclosures)} "
@@ -376,17 +425,19 @@ def run_incremental(day: str, dest: str) -> list[str]:
                     time.sleep(CALL_GAP_SEC)
             time.sleep(CALL_GAP_SEC)
     missing = sorted(
-        (corp_code, year, sorted(report_codes))
-        for (corp_code, year), report_codes in requirements.items()
+        (corp_code, year, list(report_codes))
+        for corp_code, year, report_codes in requirements
         if not any(
             (corp_code, year, report_code) in satisfied
             for report_code in report_codes
         )
     )
+    _save_deferred_requirements(base, missing)
     if missing:
-        raise RuntimeError(
-            "OpenDART periodic disclosures are not available from the "
-            f"financial endpoint yet: {missing[:20]}"
+        print(
+            "[financials-incremental] deferred until provider availability: "
+            f"{missing[:20]}",
+            flush=True,
         )
     print(
         f"[financials-incremental] complete changed={len(changed_paths)} "
