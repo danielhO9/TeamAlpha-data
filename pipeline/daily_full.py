@@ -269,6 +269,7 @@ def _main_locked(
         if collect_alternative:
             assert_epoch()
             alternative_data_incremental.run(day, conn=certification_lock)
+        kis_flows.daily(day, conn=certification_lock)
         _run_fmp_incremental(
             bucket, root, day, certification_lock=certification_lock,
         )
