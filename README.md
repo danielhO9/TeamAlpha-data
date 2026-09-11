@@ -662,6 +662,34 @@ KRX 직접 수집이나 공매도 잔고로 표시하지 않는다. KIS 공식 F
 보장한다는 뜻은 아니므로, 실제 키로 표본 호출해 측정한 응답 기간까지만 coverage로
 인증한다. 현재 KIS 수집기는 먼저 Bronze 원문과 실측 coverage를 고정하며, 응답 형태와
 기간을 실제 검증하기 전에는 Silver 백필 완료로 간주하지 않는다.
+
+공매도 **체결** 비율의 로컬 정제는 다음 명령으로 실행한다. DB 적재나
+정기 배치 연결은 하지 않으며, 기존 원문과 공급자 비율은 그대로 보존한다.
+
+```bash
+python -m pipeline.silver.short_sales \
+  --short-sales kis_short_sales.csv \
+  --raw-volumes verified_raw_volumes.csv \
+  --output short_sales_prepared.parquet
+```
+
+- 수량 입력: 문자열 `ticker`, `trade_date`(YYYYMMDD 또는 YYYY-MM-DD),
+  `ssts_cntg_qty`. 선택적으로 `short_qty_verified=true`와
+  `short_qty_evidence`를 제공한다. 기타 원본 열도 보존한다.
+- 분모 입력: `ticker`, `trade_date`, `raw_total_volume`,
+  `volume_basis=UNADJUSTED_SHARES`, `raw_volume_verified=true`,
+  `volume_evidence`(검증 근거 경로/참조). 검증 표시는 호출자가 확보한 근거를
+  전달하는 계약이며 이 변환기가 원천 데이터를 자동 인증하는 것은 아니다.
+- 종목·날짜를 정확히 연결해 `short_sale_ratio_pct = 100 * ssts_cntg_qty /
+  raw_total_volume`로 계산한다. KIS `acml_vol`(조정 기준),
+  `ssts_vol_rlim`(공급자 비율), `stnd_vol_smtn`(요청 구간 누계)은 사용하지 않는다.
+- 분모 결측/0/미검증 또는 수량이 분모를 초과하면 비율은 결측이며
+  `ratio_status`에 사유를 기록한다. 종목·날짜 중복은 관측 vintage를 먼저
+  선택하도록 오류로 차단한다. 최근 날짜 값으로 채우지 않는다.
+- `ratio_status=COMPUTED`는 계산 성공일 뿐이다. 수량 검증 근거까지 있어야
+  `ratio_value_verified=true`이며, 이 표시도 과거 공개시점/PIT 사용이나
+  종목 전기간의 무결성을 인증하지 않는다.
+
 현재 DART 업종과 오늘 받은 과거 공매도 파일은 최초 관측시각 이전으로 소급하지 않는다.
 초기 적재가 끝난 뒤 정기 `pipeline.daily_full`은 정기보고서가 접수된 회사의 전체
 재무제표 scope, 지분공시가 접수된 회사의 해당 ownership endpoint, 아직 publication
@@ -980,3 +1008,6 @@ git status --short
 uv run python -m compileall -q pipeline
 uv run pytest -q
 ```
+
+KIS 역사적 수급·공매도의 S3/RDS 적재 및 일일 자동화 운영 순서는
+[운영 문서](docs/kis-market-flows.md)를 참고한다. 기본 비활성이며, 병합 전 migration 015 적용이 필요하다.

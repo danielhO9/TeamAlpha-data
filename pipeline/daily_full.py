@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import exchange_calendars as xcals
 
-from pipeline import alternative_data_incremental, dart_silver_backfill_ecs
+from pipeline import alternative_data_incremental, dart_silver_backfill_ecs, kis_flows
 from pipeline.bronze import (
     corporate_actions,
     dart_support_action_families,
@@ -232,6 +232,7 @@ def _main_locked(
         )
         if collect_alternative:
             alternative_data_incremental.run(day, conn=certification_lock)
+        kis_flows.daily(day, conn=certification_lock)
         _run_fmp_incremental(
             bucket, root, day, certification_lock=certification_lock,
         )
@@ -573,6 +574,8 @@ def _main_locked(
     if collect_alternative:
         assert_epoch()
         alternative_data_incremental.run(day, conn=certification_lock)
+
+    kis_flows.daily(day, conn=certification_lock)
 
     # FMP is a separate source transaction. KRX/DART remains committed if FMP
     # later fails, and a task retry safely reuses the immutable raw objects.
