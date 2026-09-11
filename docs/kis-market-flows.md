@@ -4,11 +4,11 @@
 
 ## 범위
 
-2015-01-01 이후 factor-research 월별 패널의 `in_universe=True`였던 모든 asset_id의 합집합을 사용한다. 현재 제외·상장폐지 종목도 유지한다. 해당 자산의 요청 기간 전체를 조회하며 편입 기간으로 데이터를 자르지 않는다. 날짜별 ticker는 RDS asset_identifier로 연결한다. 예상 날짜는 CERTIFIED KRX price_daily에 있는 날짜이며 거래량 0인 날짜도 제외하지 않는다. 따라서 이 작업만으로 price_daily 자체의 결측을 검증하지는 않는다. 기간 내 예상 날짜가 없는 자산은 실행 요약의 assets_without_expected_dates에 기록하며, 상장 전·폐지 후인지 기준 데이터 누락인지 별도 확인해야 한다.
+2015-01-01 이후 factor-research 월별 패널의 `in_universe=True`였던 모든 asset_id의 합집합을 사용한다. 현재 제외·상장폐지 종목도 유지한다. 해당 자산의 요청 기간 전체를 조회하며 편입 기간으로 데이터를 자르지 않는다. 날짜별 ticker는 RDS asset_identifier로 연결한다. 예상 날짜는 XKRX 거래일 달력과 RDS asset의 상장·폐지 기간으로 독립 생성한다. 각 예상 날짜에 가격·CERTIFIED 인증·유일한 ticker가 모두 있어야 한다. 하나라도 빠지면 API 호출 전 중단한다. RDS에 없는 자산, 상장일 미상, 중복 식별자도 오류다. 거래량 0인 날짜도 포함한다. 기간 내 거래일이 없거나 상장 전·폐지 후인 자산만 정상 제외되며 assets_without_expected_dates에 기록한다. 상장·폐지 메타데이터와 거래일 달력 자체의 정확성은 별도의 원천 계약이다.
 
 - 수급: 개인·기관·외국인의 매수/매도/순매수 수량 및 금액. 금액은 백만원에서 원으로 변환.
 - 시장: KRX(J), 2025-03-04 이후 NXT(NX), 통합(UN). UN 응답과 J+NX를 대조한다.
-- NXT 비대상 종목의 빈 응답도 0으로 해석하지 않는다. 현재 시장별 적격 종목 이력 계약이 없으므로 해당 NX/UN 구간은 실패 기록으로 남고 Silver에 들어가지 않는다. 완전한 통합 데이터 운영 전 이 이력을 확보해야 한다.
+- NXT는 manifest의 nxt_intervals에 종목별·날짜별 적격 여부와 evidence를 지정한다. ELIGIBLE 기간만 NX/UN을 조회한다. INELIGIBLE 기간에는 NX를 호출하지 않으며 통합 수급은 KRX 원본으로 구성하고 _derivation 및 _market_evidence를 기록한다. 이력이 없거나 중첩되면 API 호출 전 중단한다. 미제공 응답을 비대상 또는 0으로 간주하지 않는다.
 - 공매도: J 요청만 수집. 비율의 분모는 일별 차트 API의 FID_ORG_ADJ_PRC=1 원거래량. 제공 비율·거래량도 별도 보존한다. 시장 범위 근거가 확인된 정책 구간만 비율을 계산하고 나머지는 NULL/MARKET_SCOPE_UNVERIFIED로 저장한다.
 
 ## 보관과 연구 사용
@@ -54,4 +54,16 @@ python -m pipeline.kis_flows backfill --manifest /path/universe.json --policy /p
 - KIS_BRONZE_ROOT: 원본 S3 루트
 - KIS_APP_KEY / KIS_APP_SECRET: 기존 비밀 주입 경로 이용
 
-최근 5개 인증 거래일을 재조회한다. manifest가 40일 이상 오래되면 중단하므로 factor-research 월별 패널 갱신 시 전체 역사 manifest도 재생성해야 한다. NXT 미제공/미확인 구간을 포함한 실패가 하나라도 있으면 일일 작업을 성공으로 보고하지 않는다. 활성화 전 실제 소규모 API/RDS 통합 검증, 시장별 적격 이력 및 공매도 시장 범위 확인이 필요하다. 이 코드 변경으로 운영 일정이나 비밀 설정은 바뀌지 않는다.
+달력 기준 최근 5거래일을 재조회한다. manifest가 40일 이상 오래되면 중단하므로 factor-research 월별 패널 갱신 시 전체 역사 manifest도 재생성해야 한다. NXT 미제공/미확인 구간을 포함한 실패가 하나라도 있으면 일일 작업을 성공으로 보고하지 않는다. 활성화 전 실제 소규모 API/RDS 통합 검증, 시장별 적격 이력 및 공매도 시장 범위 확인이 필요하다. 이 코드 변경으로 운영 일정이나 비밀 설정은 바뀌지 않는다.
+
+## NXT 적용 이력 입력
+
+전체 수집의 기본 venues는 J/NX/UN이다. KRX만 명시적으로 수집할 때는 정책에 `"venues":["J"]`를 지정하며, 이를 통합 수집 완료로 간주하지 않는다.
+
+검증한 NXT 종목 적용 이력을 JSON 배열로 만들고 export-universe에 `--nxt-intervals /path/nxt-intervals.json`을 추가한다. 이 파일은 manifest 해시에 포함된다. start/end는 양 끝 날짜를 포함하고 각 자산·거래일에는 정확히 하나의 구간이 대응해야 한다. 아래는 형식 예시이며 실제 종목의 적격 여부를 주장하는 데이터가 아니다.
+
+```json
+[{"asset_id":123,"start":"2025-03-04","end":"2025-03-07","status":"INELIGIBLE","evidence":"s3://BUCKET/verified-nxt-eligibility/source.json"}]
+```
+
+현재 운영에 올린 기존 manifest에는 이 이력이 없으므로 전체 시장 수집을 활성화하기 전에 근거를 확보하여 재생성해야 한다. 종목 목록에 없다는 이유만으로 INELIGIBLE 이력을 생성하면 안 된다. 이 수정에는 추가 RDS migration이 없다.
