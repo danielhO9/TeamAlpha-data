@@ -78,6 +78,64 @@ def test_prepare_reuses_only_explicitly_verified_snapshot_cache(
     corporate_actions._PREPARE_CACHE.clear()
 
 
+def test_daily_prepare_slices_verified_full_snapshot_cache(
+    monkeypatch, tmp_path,
+):
+    corporate_actions._PREPARE_CACHE.clear()
+    snapshot_sha = "c" * 64
+    coverage_start = date(2015, 1, 1)
+    coverage_end = date(2026, 9, 10)
+    base = str(tmp_path.resolve())
+    full_key = (
+        base,
+        snapshot_sha,
+        None,
+        coverage_start.isoformat(),
+        coverage_end.isoformat(),
+    )
+    events = pd.DataFrame([
+        {
+            **{column: None for column in corporate_actions.COLUMNS},
+            "identifier": "005930",
+            "rcept_no": "20200101000001",
+            "announcement_date": date(2020, 1, 1),
+        },
+        {
+            **{column: None for column in corporate_actions.COLUMNS},
+            "identifier": "000660",
+            "rcept_no": "20260901000001",
+            "announcement_date": date(2026, 9, 1),
+        },
+    ])
+    corporate_actions._remember_prepare(
+        full_key,
+        events,
+        {
+            "row_count": 2,
+            "effective_date_count": 0,
+            "expected_factor_count": 0,
+            "share_count_factor_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        corporate_actions,
+        "_prepare_evidence_context",
+        lambda *_args, **_kwargs: pytest.fail("full snapshot was reparsed"),
+    )
+
+    scoped, stats = corporate_actions.prepare(
+        base,
+        target_date=date(2026, 9, 10),
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        verified_snapshot_sha256=snapshot_sha,
+    )
+
+    assert scoped["rcept_no"].tolist() == ["20260901000001"]
+    assert stats["row_count"] == 1
+    corporate_actions._PREPARE_CACHE.clear()
+
+
 def _write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

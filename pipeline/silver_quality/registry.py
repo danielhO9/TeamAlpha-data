@@ -24,8 +24,18 @@ def run_registered_rules(
     target_date=None,
     history=None,
     partition_key: str | None = None,
+    changed_action_receipts: set[str] | None = None,
 ) -> list[CheckResult]:
     results: list[CheckResult] = []
+    quality_actions = bundle.actions
+    if changed_action_receipts is not None:
+        receipts = {str(value) for value in changed_action_receipts}
+        if bundle.actions.empty or "rcept_no" not in bundle.actions:
+            quality_actions = bundle.actions.iloc[0:0]
+        else:
+            quality_actions = bundle.actions[
+                bundle.actions["rcept_no"].astype(str).isin(receipts)
+            ].reset_index(drop=True)
     results.extend(check_assets(bundle.assets, bundle.identifiers, partition_key))
     krx = set(bundle.stats.get("_existing_krx_identifiers", set()))
     if not bundle.identifiers.empty:
@@ -52,9 +62,9 @@ def run_registered_rules(
             missing, "every fundamental ticker maps to a KRX asset",
             partition_key=partition_key,
         ))
-    if not bundle.actions.empty:
-        missing = bundle.actions[
-            ~bundle.actions["identifier"].astype(str).isin(krx)
+    if not quality_actions.empty:
+        missing = quality_actions[
+            ~quality_actions["identifier"].astype(str).isin(krx)
         ]
         results.append(result(
             "ACTION_IDENTIFIER_MAPPING", "corporate_action", Severity.ERROR,
@@ -344,7 +354,7 @@ def run_registered_rules(
                 {},
             ).get("source_accounting_inconsistency"),
         ))
-    if not bundle.actions.empty:
-        results.extend(check_actions(bundle.actions, partition_key))
+    if changed_action_receipts is not None or not quality_actions.empty:
+        results.extend(check_actions(quality_actions, partition_key))
     results.extend(check_reconciliation(bundle.stats, partition_key))
     return results

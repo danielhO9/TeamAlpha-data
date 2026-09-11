@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -75,6 +76,16 @@ def _pending_krx_sessions(
 
 def _key_from_s3_uri(uri: str) -> str:
     return uri.removeprefix(base_uri("s3") + "/")
+
+
+def _changed_action_receipts(paths: list[str]) -> set[str]:
+    """Extract immutable DART receipt partitions changed by this invocation."""
+    receipts: set[str] = set()
+    for path in paths:
+        match = re.search(r"/rcept=(\d{14})(?:\.|/|$)", path)
+        if match is not None:
+            receipts.add(match.group(1))
+    return receipts
 
 
 def _action_disclosure_manifest_key(action_from: str, day: str) -> str:
@@ -386,6 +397,9 @@ def _main_locked(
         before_change=invalidate_before_first_action_write,
     )
     has_action_change = bool(genuine_action_changes)
+    changed_action_receipts = _changed_action_receipts(
+        genuine_action_changes,
+    )
     changed_action_keys = [
         _key_from_s3_uri(uri) for uri in changed_action_uris
     ]
@@ -468,6 +482,7 @@ def _main_locked(
             flush=True,
         )
 
+    prepared_action_snapshot_sha256: str | None = None
     if requires_total_return_closure and prepare_total_return:
         current_snapshot_prepared = False
         if (
@@ -488,12 +503,17 @@ def _main_locked(
                     f"prices={inherited_coverage_end.isoformat()} "
                     f"target={coverage_end.isoformat()}"
                 )
-            dart_silver_backfill_ecs.prepare_total_return_snapshot(
-                inherited_coverage_end,
-                bucket=bucket,
-                root=root,
-                publish=False,
-                certification_lock=certification_lock,
+            prepared_snapshot = (
+                dart_silver_backfill_ecs.prepare_total_return_snapshot(
+                    inherited_coverage_end,
+                    bucket=bucket,
+                    root=root,
+                    publish=False,
+                    certification_lock=certification_lock,
+                )
+            )
+            prepared_action_snapshot_sha256 = getattr(
+                prepared_snapshot, "manifest_sha256", None,
             )
             if preview_total_return:
                 dart_silver_backfill_ecs.preview_total_return_actions(
@@ -518,11 +538,16 @@ def _main_locked(
         # correction family, frozen cash-scale body or v5 coverage interval
         # therefore stops the task before its KRX Silver transaction.
         if not current_snapshot_prepared:
-            dart_silver_backfill_ecs.prepare_total_return_snapshot(
-                coverage_end,
-                bucket=bucket,
-                root=root,
-                certification_lock=certification_lock,
+            prepared_snapshot = (
+                dart_silver_backfill_ecs.prepare_total_return_snapshot(
+                    coverage_end,
+                    bucket=bucket,
+                    root=root,
+                    certification_lock=certification_lock,
+                )
+            )
+            prepared_action_snapshot_sha256 = getattr(
+                prepared_snapshot, "manifest_sha256", None,
             )
             if preview_total_return:
                 dart_silver_backfill_ecs.preview_total_return_actions(
@@ -572,6 +597,8 @@ def _main_locked(
         ),
         action_coverage_end=coverage_end,
         allow_bounded_action_scope=bounded_action_scope,
+        verified_action_snapshot_sha256=prepared_action_snapshot_sha256,
+        changed_action_receipts=changed_action_receipts,
         conn=certification_lock,
     )
     print(f"[silver] incremental complete day={day}", flush=True)

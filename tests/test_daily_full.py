@@ -1,4 +1,5 @@
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -113,7 +114,10 @@ def _stub_main(monkeypatch, *, events: list[str]) -> None:
     monkeypatch.setattr(
         daily_full.dart_silver_backfill_ecs,
         "prepare_total_return_snapshot",
-        lambda *a, **k: events.append("prepare"),
+        lambda *a, **k: (
+            events.append("prepare")
+            or SimpleNamespace(manifest_sha256="verified-snapshot")
+        ),
     )
     monkeypatch.setattr(
         daily_full.dart_silver_backfill_ecs,
@@ -136,6 +140,8 @@ def _stub_main(monkeypatch, *, events: list[str]) -> None:
     def incremental(*args, **kwargs):
         assert kwargs["action_coverage_start"].isoformat() == "2015-01-01"
         assert kwargs["action_coverage_end"].isoformat() == "2026-08-10"
+        assert kwargs["verified_action_snapshot_sha256"] == "verified-snapshot"
+        assert kwargs["changed_action_receipts"] == set()
         events.append("silver-write")
 
     monkeypatch.setattr(daily_full.load, "incremental", incremental)
@@ -168,6 +174,16 @@ def test_daily_closes_total_return_before_fmp_and_freshness(monkeypatch):
         "freshness",
     ]
 
+
+def test_changed_action_receipts_ignores_manifests_and_markers():
+    assert daily_full._changed_action_receipts([
+        "s3://bronze/corporate_actions/dart/structured/event=bonus/"
+        "year=2026/corp=005930/rcept=20260910000001.json",
+        "s3://bronze/corporate_actions/dart/documents/year=2026/"
+        "corp=000660/rcept=20260910000002.zip",
+        "s3://bronze/corporate_actions/dart/manifests/from=20260827/"
+        "to=20260910/disclosures_v3.json",
+    ]) == {"20260910000001", "20260910000002"}
 
 def test_same_day_retry_skips_certified_krx_dart_tr_and_fmp(monkeypatch):
     events: list[str] = []

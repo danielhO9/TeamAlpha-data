@@ -127,6 +127,39 @@ def _remember_prepare(
     while len(_PREPARE_CACHE) > _PREPARE_CACHE_MAX_ENTRIES:
         _PREPARE_CACHE.popitem(last=False)
 
+
+def _slice_for_target_date(
+    events: pd.DataFrame,
+    target_date: date,
+) -> pd.DataFrame:
+    """Return only the rolling action context needed by one daily partition."""
+    if events.empty:
+        return events.copy(deep=True)
+    lower = target_date - pd.Timedelta(days=180)
+    upper = target_date + pd.Timedelta(days=30)
+    relevant = (
+        events["effective_date"].between(lower, upper)
+        | events["announcement_date"].between(lower, upper)
+    )
+    return events[relevant].reset_index(drop=True)
+
+
+def _stats_for_event_slice(stats: dict, events: pd.DataFrame) -> dict:
+    """Rebind frame-derived counters after slicing a verified full parse."""
+    scoped = deepcopy(stats)
+    scoped["row_count"] = len(events)
+    scoped["effective_date_count"] = int(
+        events["effective_date"].notna().sum()
+    ) if "effective_date" in events else 0
+    scoped["expected_factor_count"] = int(
+        events["expected_factor"].notna().sum()
+    ) if "expected_factor" in events else 0
+    scoped["share_count_factor_count"] = int(
+        events["share_count_factor"].notna().sum()
+    ) if "share_count_factor" in events else 0
+    return scoped
+
+
 STRUCTURED_DATE_FIELDS = {
     "paid_increase": (),
     "bonus_issue": ("nstk_asstd", "nstk_lstprd", "nstk_dividrk"),
@@ -1894,6 +1927,29 @@ def prepare(
                 flush=True,
             )
             return cached
+        if target_date is not None:
+            full_cache_key = (
+                base,
+                str(verified_snapshot_sha256),
+                None,
+                (
+                    coverage_start.isoformat()
+                    if coverage_start is not None else None
+                ),
+                coverage_end.isoformat() if coverage_end is not None else None,
+            )
+            full_cached = _cached_prepare(full_cache_key)
+            if full_cached is not None:
+                full_events, full_stats = full_cached
+                events = _slice_for_target_date(full_events, target_date)
+                stats = _stats_for_event_slice(full_stats, events)
+                _remember_prepare(cache_key, events, stats)
+                print(
+                    "[corporate-actions] reused verified full snapshot parse "
+                    "for daily action window",
+                    flush=True,
+                )
+                return events, stats
     evidence_context = _prepare_evidence_context(
         base,
         coverage_start=coverage_start,
@@ -2017,13 +2073,7 @@ def prepare(
     ).reset_index(drop=True)
     events = _classify_share_count_comparability(events)
     if target_date is not None:
-        lower = target_date - pd.Timedelta(days=180)
-        upper = target_date + pd.Timedelta(days=30)
-        relevant = (
-            events["effective_date"].between(lower, upper)
-            | events["announcement_date"].between(lower, upper)
-        )
-        events = events[relevant].reset_index(drop=True)
+        events = _slice_for_target_date(events, target_date)
     _assert_prepare_evidence_unchanged(evidence_context)
     stats = {
         "row_count": len(events),

@@ -13,12 +13,14 @@ def evaluate(
     target_date=None,
     history=None,
     partition_key: str | None = None,
+    changed_action_receipts: set[str] | None = None,
 ) -> list[CheckResult]:
     return run_registered_rules(
         bundle,
         target_date=target_date,
         history=history,
         partition_key=partition_key,
+        changed_action_receipts=changed_action_receipts,
     )
 
 

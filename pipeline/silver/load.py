@@ -43,6 +43,7 @@ def _build_candidates(
     action_coverage_end: date,
     financial_files: list[str] | None,
     dividend_files: list[str] | None,
+    verified_action_snapshot_sha256: str | None,
 ) -> CandidateBundle:
     asset_df, identifier_df = assets.prepare(base, target_date=target_date)
     preferred_to_common = assets.preferred_share_issuer_map(asset_df)
@@ -93,6 +94,7 @@ def _build_candidates(
         target_date=target_date,
         coverage_start=action_coverage_start,
         coverage_end=action_coverage_end,
+        verified_snapshot_sha256=verified_action_snapshot_sha256,
     )
     action_df, inherited_action_stats = corporate_actions.inherit_issuer_events(
         action_df,
@@ -152,6 +154,8 @@ def incremental(
     action_coverage_start: date | None = None,
     action_coverage_end: date | None = None,
     allow_bounded_action_scope: bool = False,
+    verified_action_snapshot_sha256: str | None = None,
+    changed_action_receipts: set[str] | None = None,
     conn=None,
 ) -> None:
     """Publish one daily Silver partition.
@@ -210,6 +214,9 @@ def incremental(
                 action_coverage_end=action_coverage_end,
                 financial_files=financial_files,
                 dividend_files=dividend_files,
+                verified_action_snapshot_sha256=(
+                    verified_action_snapshot_sha256
+                ),
             )
         except Exception as exc:
             transform_failure = CheckResult(
@@ -256,7 +263,25 @@ def incremental(
             target_date,
         )
         connection.commit()
-        results = evaluate(bundle, target_date=target_date, history=history)
+        if changed_action_receipts is not None:
+            action_quality_rows = int(
+                bundle.actions["rcept_no"].astype(str).isin(
+                    changed_action_receipts,
+                ).sum()
+            ) if not bundle.actions.empty else 0
+            print(
+                "[silver-quality] changed partitions "
+                f"price_rows={len(bundle.prices)} "
+                f"fundamental_rows={len(bundle.fundamentals)} "
+                f"action_rows={action_quality_rows}",
+                flush=True,
+            )
+        results = evaluate(
+            bundle,
+            target_date=target_date,
+            history=history,
+            changed_action_receipts=changed_action_receipts,
+        )
         print_summary(results)
         try:
             assert_publishable(results)
