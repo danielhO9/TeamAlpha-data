@@ -859,6 +859,69 @@ def _receipt_identity_digest(receipts: Iterable[str]) -> str:
     return hashlib.sha256(rendered).hexdigest()
 
 
+def _receipt_from_manifest(row: dict) -> ViewerReceiptEvidence:
+    rendered = dict(row)
+    for field in (
+        "attachment_keys", "family_receipt_nos", "official_family_order",
+    ):
+        rendered[field] = tuple(str(value) for value in rendered.get(field) or ())
+    return ViewerReceiptEvidence(**rendered)
+
+
+def _probe_from_manifest(row: dict) -> ViewerDependencyProbe:
+    rendered = dict(row)
+    for field in ("family_receipt_nos", "attachment_keys"):
+        rendered[field] = tuple(str(value) for value in rendered.get(field) or ())
+    return ViewerDependencyProbe(**rendered)
+
+
+def _incremental_manifest_seed(
+    root: Path,
+    *,
+    coverage_start: date,
+    coverage_end: date,
+    ordered_seeds: tuple[str, ...],
+) -> tuple[list[ViewerReceiptEvidence], list[ViewerDependencyProbe], set[str]]:
+    """Reuse immutable evidence and return only receipts needing refresh."""
+    manifest = root / MANIFEST_RELATIVE_PATH
+    if not manifest.is_file():
+        return [], [], set(ordered_seeds)
+    try:
+        raw = manifest.read_bytes()
+        payload = json.loads(raw)
+        canonical = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        previous_end = date.fromisoformat(str(payload["seed_coverage_end"]))
+        compatible = (
+            raw == canonical
+            and payload.get("schema_version") == SCHEMA_VERSION
+            and payload.get("source_contract") == SOURCE_CONTRACT
+            and payload.get("seed_coverage_start") == coverage_start.isoformat()
+            and previous_end < coverage_end
+            and payload.get("complete") is True
+        )
+        if not compatible:
+            return [], [], set(ordered_seeds)
+        previous_seeds = set(payload.get("seed_receipts") or ())
+        receipts = [
+            _receipt_from_manifest(row) for row in payload.get("receipts") or ()
+        ]
+        probes = [
+            _probe_from_manifest(row)
+            for row in payload.get("dependency_probes") or ()
+        ]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return [], [], set(ordered_seeds)
+    delta = set(ordered_seeds) - previous_seeds
+    print(
+        "[dart-viewer-corrections] incremental evidence "
+        f"reused={len(receipts)} new_seeds={len(delta)}",
+        flush=True,
+    )
+    return receipts, probes, delta
+
+
 def _dependency_probe_digest(
     probes: Iterable[ViewerDependencyProbe],
 ) -> str:
@@ -881,6 +944,7 @@ def _discover_outside_family_dependencies(
     timeout: float,
     rate_limiter: _RateLimiter,
     workers: int,
+    candidates_override: Iterable[str] | None = None,
 ) -> tuple[dict[str, bytes], tuple[ViewerDependencyProbe, ...]]:
     """Refresh provisional outside corrections and retain exact seed links.
 
@@ -893,11 +957,15 @@ def _discover_outside_family_dependencies(
         coverage_start=coverage_start,
         coverage_end=coverage_end,
     )
-    candidates = _outside_revision_candidates(
-        disclosures,
-        coverage_start=coverage_start,
-        coverage_end=coverage_end,
-    )
+    candidates = tuple(sorted(
+        candidates_override
+        if candidates_override is not None
+        else _outside_revision_candidates(
+            disclosures,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+        )
+    ))
     if not candidates:
         return {}, ()
     executor = ThreadPoolExecutor(max_workers=workers)
@@ -1137,7 +1205,12 @@ def collect_viewer_corrections(
         raise ValueError("workers must be in [1, 8]")
     if request_interval_seconds <= 0:
         raise ValueError("request_interval_seconds must be positive")
-    evidence: list[ViewerReceiptEvidence] = []
+    evidence, reused_probes, refresh_receipts = _incremental_manifest_seed(
+        root,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        ordered_seeds=ordered_seeds,
+    )
     report_names = {
         key: row.get("report_nm") for key, row in disclosures.items()
     }
@@ -1145,7 +1218,17 @@ def collect_viewer_corrections(
         request_interval_seconds,
         DEFAULT_REQUEST_JITTER_SECONDS,
     )
-    prefetched_main, dependency_probes = _discover_outside_family_dependencies(
+    current_outside = set(_outside_revision_candidates(
+        disclosures,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+    ))
+    reusable_probes = [
+        probe for probe in reused_probes
+        if probe.receipt_no in current_outside
+    ]
+    known_probe_receipts = {probe.receipt_no for probe in reusable_probes}
+    prefetched_main, new_dependency_probes = _discover_outside_family_dependencies(
         root,
         disclosures,
         coverage_start=coverage_start,
@@ -1154,9 +1237,25 @@ def collect_viewer_corrections(
         timeout=timeout,
         rate_limiter=rate_limiter,
         workers=workers,
+        candidates_override=current_outside - known_probe_receipts,
     )
-    required = seed_required | set(prefetched_main)
+    dependency_probes = tuple(sorted(
+        [*reusable_probes, *new_dependency_probes],
+        key=lambda item: item.receipt_no,
+    ))
+    reused_dependencies = {
+        probe.receipt_no for probe in reusable_probes
+        if probe.selected_dependency
+    }
+    required = seed_required | reused_dependencies | set(prefetched_main)
     ordered = tuple(sorted(required))
+    evidence = [item for item in evidence if item.receipt_no in required]
+    existing_receipts = {item.receipt_no for item in evidence}
+    refresh_receipts.update(required - existing_receipts)
+    evidence = [
+        item for item in evidence
+        if item.receipt_no not in refresh_receipts
+    ]
     executor = ThreadPoolExecutor(max_workers=workers)
     futures = {
             executor.submit(
@@ -1170,7 +1269,7 @@ def collect_viewer_corrections(
                 report_names=report_names,
                 prefetched_main_payload=prefetched_main.get(receipt),
             ): receipt
-            for receipt in ordered
+            for receipt in sorted(refresh_receipts)
         }
     try:
         for completed, future in enumerate(as_completed(futures), start=1):
@@ -1188,6 +1287,43 @@ def collect_viewer_corrections(
         raise
     else:
         executor.shutdown(wait=True)
+    # A newly observed correction changes the mutable family selector for its
+    # older members. Refresh only reused members of those exact families.
+    refreshed_receipts = {
+        item.receipt_no for item in evidence
+        if item.receipt_no in refresh_receipts
+    }
+    touched_roots = {
+        item.revision_root_receipt_no for item in evidence
+        if item.receipt_no in refreshed_receipts
+    }
+    family_refresh = {
+        item.receipt_no for item in evidence
+        if item.receipt_no not in refreshed_receipts
+        and item.revision_root_receipt_no in touched_roots
+    }
+    if family_refresh:
+        refresh_executor = ThreadPoolExecutor(max_workers=workers)
+        refresh_futures = {
+            refresh_executor.submit(
+                _fetch_one,
+                root,
+                receipt,
+                tries=tries,
+                timeout=timeout,
+                rate_limiter=rate_limiter,
+                report_name=disclosures[receipt].get("report_nm"),
+                report_names=report_names,
+            ): receipt
+            for receipt in sorted(family_refresh)
+        }
+        replacements = [
+            future.result() for future in as_completed(refresh_futures)
+        ]
+        refresh_executor.shutdown(wait=True)
+        evidence = [
+            item for item in evidence if item.receipt_no not in family_refresh
+        ] + replacements
     # An intermediate correction can point to a later plain (non-correction)
     # terminal receipt, which is not in the initial correction-only set.  Add
     # those exact official-family dependencies and repeat until closure.

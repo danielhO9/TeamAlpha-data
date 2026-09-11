@@ -1,8 +1,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from pipeline.bronze import financials
 
 
@@ -110,7 +108,7 @@ def test_incremental_financials_make_no_financial_api_call_without_filings(
     assert financials.run_incremental("20260901", "s3") == []
 
 
-def test_incremental_financials_retry_when_filed_report_is_not_available(
+def test_incremental_financials_defers_when_filed_report_is_not_available(
     tmp_path: Path, monkeypatch,
 ):
     monkeypatch.setattr(financials, "base_uri", lambda _dest: str(tmp_path))
@@ -129,5 +127,47 @@ def test_incremental_financials_retry_when_filed_report_is_not_available(
         financials, "_fetch_multi", lambda *_args: ("013", {"status": "013"}),
     )
 
-    with pytest.raises(RuntimeError, match="not available"):
-        financials.run_incremental("20260901", "s3")
+    assert financials.run_incremental("20260901", "s3") == []
+    deferred = json.loads(
+        (tmp_path / financials.DEFERRED_REQUIREMENTS_PATH).read_text()
+    )
+    assert deferred == [{
+        "corp_code": "00126380",
+        "report_codes": ["11011"],
+        "year": 2025,
+    }]
+
+
+def test_incremental_financials_retries_deferred_scope_on_a_later_day(
+    tmp_path: Path, monkeypatch,
+):
+    monkeypatch.setattr(financials, "base_uri", lambda _dest: str(tmp_path))
+    monkeypatch.setattr(
+        financials, "ensure_corp_code_xml", lambda _base: [("00126380", "005930")],
+    )
+    deferred_path = tmp_path / financials.DEFERRED_REQUIREMENTS_PATH
+    deferred_path.parent.mkdir(parents=True)
+    deferred_path.write_text(json.dumps([{
+        "corp_code": "00126380",
+        "report_codes": ["11011"],
+        "year": 2025,
+    }]))
+    monkeypatch.setattr(financials, "_regular_disclosures", lambda *_args: [])
+    monkeypatch.setattr(
+        financials,
+        "_fetch_multi",
+        lambda _corps, year, report: ("000", {"list": [{
+            "stock_code": "005930",
+            "fs_div": "CFS",
+            "account_nm": "자산총계",
+            "reprt_code": report,
+            "bsns_year": str(year),
+        }]}),
+    )
+
+    changed = financials.run_incremental("20260902", "s3")
+
+    assert changed == [
+        str(tmp_path / "financials/dart/year=2025/corp=005930/11011.json")
+    ]
+    assert json.loads(deferred_path.read_text()) == []

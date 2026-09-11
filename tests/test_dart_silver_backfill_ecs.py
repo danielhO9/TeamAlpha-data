@@ -142,6 +142,20 @@ def test_prepare_snapshot_downloads_refreshes_builds_then_publishes(
     ]
 
 
+def test_retry_restore_requires_exact_published_coverage(monkeypatch, tmp_path):
+    monkeypatch.setattr(ecs.boto3, "client", lambda _service: object())
+    monkeypatch.setattr(
+        ecs,
+        "_restore_published_snapshot",
+        lambda *_args: SimpleNamespace(coverage_end=date(2026, 8, 9)),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match retry coverage"):
+        ecs.restore_published_total_return_snapshot(
+            date(2026, 8, 10), bucket="bronze", root=tmp_path,
+        )
+
+
 def test_download_bounds_submitted_future_batches(monkeypatch, tmp_path):
     class FakeS3:
         def download_file(self, bucket, key, destination):
@@ -210,7 +224,7 @@ def test_persistent_download_cache_fetches_only_new_or_changed_objects(
     assert sorted(downloads) == ["mutable/b", "new/c"]
 
 
-def test_close_total_return_contract_orders_both_previews_apply_and_audit(
+def test_close_total_return_contract_runs_one_atomic_rebuild_and_audit(
     monkeypatch, tmp_path,
 ):
     calls = []
@@ -250,10 +264,6 @@ def test_close_total_return_contract_orders_both_previews_apply_and_audit(
 
     assert result["safe_for_research"] is True
     assert calls == [
-        ("rebuild", {
-            "actions_base": str(tmp_path),
-            "conn": certification_lock,
-        }),
         ("dart", {
             "src": "local", "apply": True,
             "total_return_actions_only": True,
@@ -261,8 +271,11 @@ def test_close_total_return_contract_orders_both_previews_apply_and_audit(
             "base_override": str(tmp_path),
             "conn": certification_lock,
         }),
-        ("rebuild", {"conn": certification_lock}),
-        ("rebuild", {"apply": True, "conn": certification_lock}),
+        ("rebuild", {
+            "apply": True,
+            "batch_size": 500,
+            "conn": certification_lock,
+        }),
         ("audit", {"conn": certification_lock}),
     ]
 
@@ -607,10 +620,13 @@ def test_lock_session_loss_during_close_cannot_reach_rebuild_certification(
             certification_lock=certification_lock,
         )
 
-    assert calls[0][0] == "rebuild"
-    assert calls[0][1]["conn"] is certification_lock
-    assert calls[1][0] == "action"
-    assert len(calls) == 2
+    assert calls == [("action", {
+        "src": "local", "apply": True,
+        "total_return_actions_only": True,
+        "expected_coverage_end": date(2026, 8, 10),
+        "base_override": str(tmp_path),
+        "conn": certification_lock,
+    })]
 
 
 def test_krx_gap_is_disabled_before_any_incremental_mutation(monkeypatch):

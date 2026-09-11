@@ -330,6 +330,35 @@ def test_complete_current_manifest_is_atomically_refreshed_for_new_interval(
     assert _verify(tmp_path) == refreshed
 
 
+def test_coverage_extension_reuses_unchanged_support_families(tmp_path):
+    original, correction, remote = _stock_fixture(tmp_path)
+    first_end = date(2021, 12, 31)
+    second_end = date(2022, 1, 31)
+    first = _collect(
+        tmp_path, coverage_end=first_end, apply=True, fetcher=remote,
+    )
+    first_call_count = len(remote.calls)
+    _write_interval(
+        tmp_path,
+        [
+            _stock_row(original),
+            _stock_row(correction, report="[기재정정] 주식배당결정"),
+        ],
+        start="20211215",
+        end="20220115",
+    )
+
+    second = _collect(
+        tmp_path, coverage_end=second_end, apply=True, fetcher=remote,
+    )
+
+    assert [item.root_receipt_no for item in second.entries] == [
+        item.root_receipt_no for item in first.entries
+    ]
+    assert len(remote.calls) == first_call_count
+    assert _verify(tmp_path, required_end=second_end) == second
+
+
 def test_stock_ratio_missing_or_preferred_only_fails_closed():
     no_ratio = b"""
       <table>

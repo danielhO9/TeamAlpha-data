@@ -685,6 +685,43 @@ def _evidence(receipt, classification, *, family, amount=150.0, record=None):
     )
 
 
+def test_incremental_manifest_seed_reuses_old_evidence_and_returns_delta(
+    tmp_path,
+):
+    old_receipt = "20250102000001"
+    new_receipt = "20250103000002"
+    evidence = _evidence(
+        old_receipt, "ECONOMIC_DECISION",
+        family=(old_receipt,), record="2024-12-31",
+    )
+    payload = {
+        "schema_version": viewer.SCHEMA_VERSION,
+        "source_contract": viewer.SOURCE_CONTRACT,
+        "seed_coverage_start": "2015-01-01",
+        "seed_coverage_end": "2025-01-02",
+        "complete": True,
+        "seed_receipts": [old_receipt],
+        "receipts": [evidence.__dict__],
+        "dependency_probes": [],
+    }
+    manifest = tmp_path / viewer.MANIFEST_RELATIVE_PATH
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode())
+
+    reused, probes, delta = viewer._incremental_manifest_seed(
+        tmp_path,
+        coverage_start=date(2015, 1, 1),
+        coverage_end=date(2025, 1, 3),
+        ordered_seeds=(old_receipt, new_receipt),
+    )
+
+    assert reused == [evidence]
+    assert probes == []
+    assert delta == {new_receipt}
+
+
 def test_official_family_allows_incomplete_intermediate_when_terminal_complete():
     family = ("20250228801790", "20250304800639")
     rows = [

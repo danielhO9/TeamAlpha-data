@@ -198,6 +198,42 @@ def test_same_day_retry_skips_certified_krx_dart_tr_and_fmp(monkeypatch):
     assert events == ["freshness"]
 
 
+def test_same_day_retry_repairs_building_return_without_source_collection(
+    monkeypatch,
+):
+    events: list[str] = []
+    _stub_main(monkeypatch, events=events)
+    monkeypatch.setattr(
+        daily_full.repository,
+        "certified_target_exists",
+        lambda _conn, mode, _day: mode == "daily",
+    )
+    monkeypatch.setattr(
+        daily_full.dart_silver_backfill_ecs,
+        "total_return_contract_ready",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        daily_full.dart_silver_backfill_ecs,
+        "restore_published_total_return_snapshot",
+        lambda *args, **kwargs: events.append("restore"),
+    )
+    monkeypatch.setattr(
+        daily_full.stock_krxapi,
+        "run",
+        lambda *_args: pytest.fail("KRX collection must be skipped"),
+    )
+    monkeypatch.setattr(
+        daily_full.financials,
+        "run_incremental",
+        lambda *_args: pytest.fail("DART collection must be skipped"),
+    )
+
+    daily_full.main()
+
+    assert events == ["restore", "close", "fmp", "freshness"]
+
+
 def test_holiday_financial_refresh_closes_actual_post_publish_invalidation(
     monkeypatch,
 ):

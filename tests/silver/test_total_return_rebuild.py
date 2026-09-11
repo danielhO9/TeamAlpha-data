@@ -76,6 +76,25 @@ def test_build_batch_applies_dividend_and_audits_source_action():
     assert audit["quality_run_id"] == run_id
 
 
+def test_incremental_extension_only_calculates_new_rows_and_resets_after_gap():
+    run_id = uuid4()
+    rows = [
+        (1, date(2026, 1, 5), 110.0, date(2026, 1, 2), 100.0, 150.0),
+        (1, date(2026, 1, 6), 121.0, date(2026, 1, 2), 100.0, 150.0),
+        (2, date(2026, 1, 5), 80.0, None, None, None),
+        (3, date(2026, 1, 5), 70.0, date(2024, 1, 2), 60.0, 90.0),
+    ]
+
+    extended = rebuild._extend_unchanged_price_rows(rows, run_id=run_id)
+
+    assert [row["total_return_close"] for row in extended] == pytest.approx([
+        165.0, 181.5, 80.0, 70.0,
+    ])
+    assert all(
+        row["total_return_quality_run_id"] == run_id for row in extended
+    )
+
+
 def test_build_batch_uses_database_half_up_cash_rounding():
     prices = _prices([
         (1, "1", date(2026, 1, 2), 100.0, 100.0),

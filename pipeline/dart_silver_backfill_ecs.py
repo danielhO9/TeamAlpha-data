@@ -588,6 +588,43 @@ def _restore_published_snapshot(
     )
 
 
+def restore_published_total_return_snapshot(
+    coverage_end: date,
+    *,
+    bucket: str | None = None,
+    root: Path | None = None,
+) -> None:
+    """Restore the exact published action bundle for a retry-only recovery.
+
+    A daily retry whose KRX/DART Silver transaction is already certified must
+    not repeat source discovery or rebuild the generated evidence bundle.  The
+    immutable current pointer already binds every object by length and digest,
+    so restoring and checking its coverage is sufficient before the atomic
+    action publication and total-return repair.
+    """
+    bucket = bucket or os.environ["S3_BRONZE_BUCKET"]
+    root = (root or DATA_ROOT).resolve()
+    pointer = _restore_published_snapshot(
+        boto3.client("s3"), bucket, root,
+    )
+    if pointer is None:
+        raise RuntimeError(
+            "cannot repair total-return contract without a published "
+            "DART action snapshot"
+        )
+    if pointer.coverage_end != coverage_end:
+        raise RuntimeError(
+            "published DART action snapshot does not match retry coverage: "
+            f"published={pointer.coverage_end.isoformat()} "
+            f"required={coverage_end.isoformat()}"
+        )
+    print(
+        "[dart-silver-ecs] retry restored published action snapshot "
+        f"coverage_end={coverage_end.isoformat()}",
+        flush=True,
+    )
+
+
 def _put_immutable_snapshot_object(
     client,
     bucket: str,
@@ -864,10 +901,11 @@ def prepare_total_return_snapshot(
     """Build a current, complete v5 action snapshot before any Silver write.
 
     The daily task first writes its native OpenDART interval to S3.  This
-    preflight then downloads the complete historical source set, refreshes the
-    official viewer/family evidence, and builds the v5 manifest through the
-    requested calendar date.  If any source family or frozen cash-scale input
-    is incomplete, the function raises before the daily KRX price transaction.
+    preflight syncs the immutable historical source set, extends official
+    viewer/family evidence only for newly observed or touched families, and
+    builds the v5 manifest through the requested calendar date. If any source
+    family or frozen cash-scale input is incomplete, the function raises before
+    the daily KRX price transaction.
     """
     bucket = bucket or os.environ["S3_BRONZE_BUCKET"]
     root = (root or DATA_ROOT).resolve()
@@ -1042,13 +1080,14 @@ def close_total_return_contract(
     root: Path | None = None,
     certification_lock=None,
 ) -> dict:
-    """Close preview -> action publish -> rebuild -> fatal audit in order.
+    """Publish actions, rebuild once, then run the fatal independent audit.
 
-    This is called immediately after the daily KRX transaction.  The first
-    preview sees the newly certified raw price day together with local actions,
-    so an unseen price-scale overlap fails before action publication.  Because
-    the raw price transaction already invalidated the old label, any such
-    failure remains visibly BUILDING instead of silently stale-CERTIFIED.
+    Snapshot preparation and the action-only preview have already validated
+    the immutable local evidence before this function is reached.  Rebuilding
+    the complete price history twice more as read-only previews duplicated the
+    exact work performed by the atomic apply run.  The apply run is itself
+    fail-closed: any validation error rolls back its price/audit transaction
+    and leaves the contract visibly BUILDING.
     """
     root = (root or DATA_ROOT).resolve()
     if certification_lock is None:
@@ -1056,12 +1095,6 @@ def close_total_return_contract(
             "total-return certification requires the daily epoch lock"
         )
     assert_daily_certification_lock(certification_lock)
-    # Validate local actions and cash-scale evidence against the just-published
-    # KRX price coverage before mutating the persisted action snapshot.
-    total_return_rebuild.run(
-        actions_base=str(root),
-        conn=certification_lock,
-    )
     dart_extra_load.run(
         src="local",
         apply=True,
@@ -1070,10 +1103,17 @@ def close_total_return_contract(
         base_override=str(root),
         conn=certification_lock,
     )
-    # Re-resolve the exact persisted snapshot in a DB-enforced read-only
-    # transaction before the single atomic rebuild/certification transaction.
-    total_return_rebuild.run(conn=certification_lock)
-    total_return_rebuild.run(apply=True, conn=certification_lock)
+    assert_daily_certification_lock(certification_lock)
+    rebuild_batch_size = int(os.environ.get(
+        "TOTAL_RETURN_REBUILD_BATCH_SIZE", "500",
+    ))
+    if rebuild_batch_size < 1:
+        raise RuntimeError("TOTAL_RETURN_REBUILD_BATCH_SIZE must be positive")
+    total_return_rebuild.run(
+        apply=True,
+        batch_size=rebuild_batch_size,
+        conn=certification_lock,
+    )
     report = total_return_audit.audit(conn=certification_lock)
     if not report.get("safe_for_research"):
         failed = sorted(
