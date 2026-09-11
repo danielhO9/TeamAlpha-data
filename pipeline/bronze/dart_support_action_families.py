@@ -1866,6 +1866,51 @@ def _parse_entries(value: object) -> tuple[SupportActionFamilyEntry, ...]:
     return tuple(result)
 
 
+def _rederive_cached_entry(
+    root: Path,
+    snapshot: _FreshSnapshot,
+    entry: SupportActionFamilyEntry,
+) -> SupportActionFamilyEntry:
+    """Rebind fresh list provenance without refetching immutable bodies."""
+    artifacts: dict[str, _Artifact] = {}
+    for source in entry.sources:
+        main_bind = _FileBind(
+            source.main_path, source.main_content_length, source.main_sha256,
+        )
+        body_bind = _FileBind(
+            source.body_path, source.body_content_length, source.body_sha256,
+        )
+        main = _verify_object_bind(root, main_bind)
+        body = _verify_object_bind(root, body_bind)
+        disclosure = snapshot.disclosures.get(source.receipt_no)
+        if disclosure is None:
+            raise RuntimeError(
+                "cached support-family source disappeared: "
+                f"{source.receipt_no}"
+            )
+        parsed = parse_official_dart_main_page(
+            source.receipt_no,
+            main,
+            expected_attachment_only=_is_attachment_only(
+                disclosure.row.get("report_nm")
+            ),
+        )
+        artifacts[source.receipt_no] = _Artifact(
+            main=main,
+            body=body,
+            parsed_main=parsed,
+            main_bind=main_bind,
+            body_bind=body_bind,
+        )
+    return _derive_entry(
+        root,
+        snapshot,
+        entry.action_type,
+        entry.ordered_family_receipts,
+        artifacts,
+    )
+
+
 def verify_support_action_families(
     base: str | Path,
     *,
@@ -2073,7 +2118,8 @@ def collect_support_action_families(
         changed_roots = {entry.root_receipt_no for entry in changed_entries}
         entries = tuple(sorted(
             [
-                entry for entry in previous_entries
+                _rederive_cached_entry(root, snapshot, entry)
+                for entry in previous_entries
                 if entry.root_receipt_no not in changed_roots
             ] + list(changed_entries),
             key=lambda item: (
