@@ -2,8 +2,9 @@
 
 Raw KRX prices and issuer cash-dividend actions are inputs to
 ``total_return_close``.  Publishing either input invalidates any prior
-certification in the same transaction.  The bounded full rebuild is the only
-workflow that promotes the contract back to ``CERTIFIED``.
+certification in the same transaction. The closed incremental rebuild promotes
+the contract after recomputing changed assets, extending unchanged assets, and
+independently auditing the complete inherited lineage.
 
 Migration 009 is intentionally optional while older development databases and
 unit-test fixtures are still in use.  Missing contract tables therefore make

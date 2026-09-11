@@ -85,6 +85,7 @@ from pipeline.silver.total_returns import (
     classify_cash_dividend_revisions,
     resolve_dividend_ex_dates,
 )
+from pipeline.silver.prices import LISTING_EPISODE_GAP_DAYS
 from pipeline.silver_quality import repository
 from pipeline.silver_quality.models import (
     CheckResult,
@@ -199,6 +200,10 @@ class RebuildSummary:
     changed_scale_event_count: int = 0
     resolution_parity_count: int = 0
     action_snapshot_cash_scale_evidence: dict | None = None
+    rebuild_mode: str = "full"
+    recomputed_asset_count: int = 0
+    recomputed_price_row_count: int = 0
+    appended_price_row_count: int = 0
 
     def absorb(self, batch: "BatchRebuild") -> None:
         self.asset_count += int(batch.prices["asset_id"].nunique())
@@ -231,6 +236,15 @@ class BatchRebuild:
     stable_scale_event_count: int = 0
     changed_scale_event_count: int = 0
     resolution_parity_count: int = 0
+
+
+@dataclass(frozen=True)
+class IncrementalBaseline:
+    """Last certified return generation that an incremental run may inherit."""
+
+    run_id: UUID
+    action_snapshot_run_id: UUID
+    coverage_end: date
 
 
 @dataclass(frozen=True)
@@ -2106,6 +2120,17 @@ def _certify_contract(
             "expected": summary.price_row_count,
             "actual": summary.price_row_count,
             "passed": True,
+            "contract": "certified_generation_lineage_v2",
+            "current_run_rows": (
+                summary.recomputed_price_row_count
+                + summary.appended_price_row_count
+            ),
+        },
+        "incremental_execution": {
+            "mode": summary.rebuild_mode,
+            "recomputed_asset_count": summary.recomputed_asset_count,
+            "recomputed_price_row_count": summary.recomputed_price_row_count,
+            "appended_price_row_count": summary.appended_price_row_count,
         },
         "input_scope": {
             "prices": "CERTIFIED KRX common_stock KOSPI/KOSDAQ",
@@ -2138,10 +2163,13 @@ def _certify_contract(
                    min(p.trade_date), max(p.trade_date),
                    count(*) FILTER (
                        WHERE p.total_return_quality_run_id=%s
+                          OR (tr.status='CERTIFIED'
+                              AND tr.mode='krx_total_return_rebuild')
                    )
             FROM price_daily p
             JOIN asset a ON a.asset_id=p.asset_id
             JOIN dq_run q ON q.run_id=p.quality_run_id
+            LEFT JOIN dq_run tr ON tr.run_id=p.total_return_quality_run_id
             WHERE p.source='KRX'
               AND a.asset_type='stock'
               AND a.instrument_type='common_stock'
@@ -2176,7 +2204,7 @@ def _certify_contract(
             raise RuntimeError("final total-return coverage bounds changed")
         if int(run_parity_count) != summary.price_row_count:
             raise RuntimeError(
-                "total_return_quality_run_id parity failed: "
+                "total-return certified lineage parity failed: "
                 f"expected={summary.price_row_count} actual={run_parity_count}"
             )
         cur.execute(
@@ -2228,6 +2256,312 @@ def _certify_contract(
         )
 
 
+def _incremental_baseline(conn) -> IncrementalBaseline | None:
+    """Resolve an intact prior certification even after Bronze invalidation.
+
+    Bronze invalidation deliberately changes the contract state to BUILDING,
+    but preserves its certified coverage and metadata.  The immutable dq_run
+    and resolution generations provide the previous run identity.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.coverage_end,
+                   c.metadata->>'action_snapshot_run_id',
+                   q.run_id
+            FROM price_return_contract c
+            CROSS JOIN LATERAL (
+                SELECT run_id
+                FROM dq_run
+                WHERE mode='krx_total_return_rebuild'
+                  AND status='CERTIFIED'
+                ORDER BY finished_at DESC NULLS LAST, started_at DESC
+                LIMIT 1
+            ) q
+            WHERE c.source='KRX' AND c.asset_type='stock'
+              AND c.field_name='total_return_close'
+              AND c.methodology_version=%s
+              AND c.coverage_end IS NOT NULL
+              AND c.metadata ? 'action_snapshot_run_id'
+            """,
+            (METHODOLOGY_VERSION,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        return IncrementalBaseline(
+            coverage_end=row[0],
+            action_snapshot_run_id=UUID(str(row[1])),
+            run_id=UUID(str(row[2])),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _changed_return_asset_ids(
+    conn,
+    baseline: IncrementalBaseline,
+    current_snapshot_run_id: UUID,
+) -> list[int]:
+    """Return only assets whose return inputs changed since certification."""
+    action_projection = """
+        SELECT asset_id,source,action_key,action_type,action_scope,
+               announcement_date,ex_date,record_date,cash_amount,filing_id,
+               cash_amount_status,source_evidence_status,
+               correction_of_action_key,revision_root_action_key,
+               revision_kind,viewer_evidence_sha256,economic_evidence_sha256,
+               reviewed_correction_id,payment_date_quality_status
+        FROM corporate_action
+        WHERE quality_run_id=%s
+          AND action_scope='ISSUER'
+          AND action_type IN ('cash_dividend','ex_dividend')
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            WITH current_actions AS ({action_projection}),
+                 previous_actions AS ({action_projection}),
+                 changed AS (
+                    (SELECT * FROM current_actions
+                     EXCEPT SELECT * FROM previous_actions)
+                    UNION
+                    (SELECT * FROM previous_actions
+                     EXCEPT SELECT * FROM current_actions)
+                 ), scale_changed AS (
+                    SELECT asset_id FROM (
+                        (SELECT asset_id,evidence_key,manifest_row_sha256
+                         FROM cash_adjustment_scale_source_evidence
+                         WHERE action_snapshot_run_id=%s
+                         EXCEPT
+                         SELECT asset_id,evidence_key,manifest_row_sha256
+                         FROM cash_adjustment_scale_source_evidence
+                         WHERE action_snapshot_run_id=%s)
+                        UNION
+                        (SELECT asset_id,evidence_key,manifest_row_sha256
+                         FROM cash_adjustment_scale_source_evidence
+                         WHERE action_snapshot_run_id=%s
+                         EXCEPT
+                         SELECT asset_id,evidence_key,manifest_row_sha256
+                         FROM cash_adjustment_scale_source_evidence
+                         WHERE action_snapshot_run_id=%s)
+                    ) delta
+                 ), pending AS (
+                    SELECT asset_id FROM current_actions
+                    WHERE coalesce(ex_date,record_date,announcement_date) > %s
+                 ), missing AS (
+                    SELECT DISTINCT p.asset_id
+                    FROM price_daily p
+                    JOIN asset a ON a.asset_id=p.asset_id
+                    JOIN dq_run q ON q.run_id=p.quality_run_id
+                    WHERE p.source='KRX' AND q.status='CERTIFIED'
+                      AND a.asset_type='stock'
+                      AND a.instrument_type='common_stock'
+                      AND a.exchange='KRX'
+                      AND p.market IN ('KOSPI','KOSDAQ')
+                      AND p.trade_date >= %s
+                      AND p.total_return_close IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM price_daily prior
+                          WHERE prior.asset_id=p.asset_id
+                            AND prior.source='KRX'
+                            AND prior.trade_date < p.trade_date
+                            AND prior.total_return_close IS NOT NULL
+                      )
+                 )
+            SELECT DISTINCT asset_id FROM (
+                SELECT asset_id FROM changed
+                UNION ALL SELECT asset_id FROM scale_changed
+                UNION ALL SELECT asset_id FROM pending
+                UNION ALL SELECT asset_id FROM missing
+            ) affected
+            ORDER BY asset_id
+            """,
+            (
+                current_snapshot_run_id,
+                baseline.action_snapshot_run_id,
+                current_snapshot_run_id,
+                baseline.action_snapshot_run_id,
+                baseline.action_snapshot_run_id,
+                current_snapshot_run_id,
+                baseline.coverage_end,
+                CONTRACT_COVERAGE_START,
+            ),
+        )
+        return [int(row[0]) for row in cur.fetchall()]
+
+
+def _copy_unaffected_resolution_rows(
+    conn,
+    *,
+    baseline: IncrementalBaseline,
+    run_id: UUID,
+    current_snapshot_run_id: UUID,
+    affected_asset_ids: Sequence[int],
+) -> int:
+    """Copy immutable audit decisions for assets with identical inputs."""
+    select_columns = []
+    for column in _AUDIT_COLUMNS:
+        if column == "quality_run_id":
+            select_columns.append("%s")
+        elif column == "scale_evidence_action_snapshot_run_id":
+            select_columns.append(
+                "CASE WHEN scale_evidence_action_snapshot_run_id IS NULL "
+                "THEN NULL ELSE %s END"
+            )
+        else:
+            select_columns.append(column)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO dividend_event_resolution ({','.join(_AUDIT_COLUMNS)})
+            SELECT {','.join(select_columns)}
+            FROM dividend_event_resolution
+            WHERE quality_run_id=%s
+              AND NOT (asset_id=ANY(%s))
+            """,
+            (
+                run_id,
+                current_snapshot_run_id,
+                baseline.run_id,
+                list(affected_asset_ids),
+            ),
+        )
+        return int(cur.rowcount)
+
+
+def _append_unchanged_prices(
+    conn,
+    *,
+    run_id: UUID,
+    affected_asset_ids: Sequence[int],
+) -> int:
+    """Extend unchanged assets from their last certified return value."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.asset_id,p.trade_date,p.adj_close,
+                   prior.trade_date,prior.adj_close,prior.total_return_close
+            FROM price_daily p
+            JOIN asset a ON a.asset_id=p.asset_id
+            JOIN dq_run q ON q.run_id=p.quality_run_id
+            LEFT JOIN LATERAL (
+                SELECT h.trade_date,h.adj_close,h.total_return_close
+                FROM price_daily h
+                WHERE h.asset_id=p.asset_id AND h.source='KRX'
+                  AND h.trade_date < p.trade_date
+                  AND h.total_return_close IS NOT NULL
+                ORDER BY h.trade_date DESC LIMIT 1
+            ) prior ON true
+            WHERE p.source='KRX' AND q.status='CERTIFIED'
+              AND a.asset_type='stock'
+              AND a.instrument_type='common_stock'
+              AND a.exchange='KRX'
+              AND p.market IN ('KOSPI','KOSDAQ')
+              AND p.trade_date >= %s
+              AND p.total_return_close IS NULL
+              AND NOT (p.asset_id=ANY(%s))
+            ORDER BY p.asset_id,p.trade_date
+            """,
+            (CONTRACT_COVERAGE_START, list(affected_asset_ids)),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return 0
+    records = _extend_unchanged_price_rows(rows, run_id=run_id)
+    batch = BatchRebuild(
+        prices=pd.DataFrame(records),
+        audit=pd.DataFrame(columns=_AUDIT_COLUMNS),
+        canonical_event_count=0,
+        applied_event_count=0,
+        excluded_event_count=0,
+    )
+    updated, _ = _publish_batch(conn, batch)
+    return updated
+
+
+def _extend_unchanged_price_rows(rows: Iterable[tuple], *, run_id: UUID) -> list[dict]:
+    """Pure recurrence used for new rows of action-unchanged assets."""
+    records: list[dict] = []
+    state: dict[int, tuple[date, float, float]] = {}
+    for asset_id, trade_date, adj_close, prior_date, prior_adj, prior_total in rows:
+        asset_id = int(asset_id)
+        previous = state.get(asset_id)
+        if previous is None and prior_date is not None:
+            previous = (prior_date, float(prior_adj), float(prior_total))
+        current_adj = float(adj_close)
+        if (
+            previous is None
+            or (trade_date - previous[0]).days > LISTING_EPISODE_GAP_DAYS
+        ):
+            total_return = current_adj
+        else:
+            total_return = previous[2] * current_adj / previous[1]
+        state[asset_id] = (trade_date, current_adj, total_return)
+        records.append({
+            "asset_id": asset_id,
+            "trade_date": trade_date,
+            "total_return_close": total_return,
+            "total_return_quality_run_id": run_id,
+        })
+    return records
+
+
+def _refresh_incremental_summary(conn, summary: RebuildSummary, run_id: UUID) -> None:
+    """Populate full-contract counts after changed-only publication."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*),count(DISTINCT p.asset_id),
+                   min(p.trade_date),max(p.trade_date)
+            FROM price_daily p
+            JOIN asset a ON a.asset_id=p.asset_id
+            JOIN dq_run q ON q.run_id=p.quality_run_id
+            WHERE p.source='KRX' AND q.status='CERTIFIED'
+              AND a.asset_type='stock' AND a.instrument_type='common_stock'
+              AND a.exchange='KRX' AND p.market IN ('KOSPI','KOSDAQ')
+              AND p.trade_date >= %s
+            """,
+            (CONTRACT_COVERAGE_START,),
+        )
+        row_count, asset_count, start, end = cur.fetchone()
+        cur.execute(
+            """
+            SELECT count(*),
+                   count(*) FILTER (WHERE is_canonical),
+                   count(*) FILTER (
+                       WHERE is_canonical AND excluded_reason IS NULL),
+                   count(*) FILTER (
+                       WHERE NOT is_canonical AND excluded_reason IS NOT NULL),
+                   count(*) FILTER (
+                       WHERE is_canonical AND excluded_reason IS NULL
+                         AND NOT scale_change_detected),
+                   count(*) FILTER (
+                       WHERE is_canonical AND excluded_reason IS NULL
+                         AND scale_change_detected),
+                   count(*) FILTER (
+                       WHERE is_canonical AND excluded_reason IS NULL
+                         AND scale_price_factor_parity)
+            FROM dividend_event_resolution WHERE quality_run_id=%s
+            """,
+            (run_id,),
+        )
+        stats = [int(value) for value in cur.fetchone()]
+    summary.price_row_count = int(row_count)
+    summary.asset_count = int(asset_count)
+    summary.coverage_start = start.isoformat()
+    summary.coverage_end = end.isoformat()
+    (
+        summary.cash_action_count,
+        summary.canonical_event_count,
+        summary.applied_event_count,
+        summary.excluded_event_count,
+        summary.stable_scale_event_count,
+        summary.changed_scale_event_count,
+        summary.resolution_parity_count,
+    ) = stats
+
+
 def _rebuild(
     conn,
     *,
@@ -2236,6 +2570,7 @@ def _rebuild(
     max_dividend_yield: float,
     run_id: UUID | None,
     actions_base: str | None = None,
+    baseline: IncrementalBaseline | None = None,
 ) -> RebuildSummary:
     if apply and actions_base is not None:
         raise ValueError("local actions cannot be used by apply rebuilds")
@@ -2377,11 +2712,34 @@ def _rebuild(
         source_price_coverage_start=source_price_start.isoformat(),
         source_price_coverage_end=source_price_end.isoformat(),
     )
+    rebuild_asset_ids = asset_ids
     if apply:
         _create_temp_stages(conn)
+        if (
+            baseline is not None
+            and certified_snapshot is not None
+            and baseline.coverage_end <= source_price_end
+        ):
+            rebuild_asset_ids = _changed_return_asset_ids(
+                conn, baseline, certified_snapshot.run_id,
+            )
+            summary.rebuild_mode = "incremental"
+            _copy_unaffected_resolution_rows(
+                conn,
+                baseline=baseline,
+                run_id=run_id,
+                current_snapshot_run_id=certified_snapshot.run_id,
+                affected_asset_ids=rebuild_asset_ids,
+            )
+            print(
+                "[total-return] incremental scope "
+                f"affected_assets={len(rebuild_asset_ids)} "
+                f"universe_assets={len(asset_ids)}",
+                flush=True,
+            )
 
     for batch_number, asset_batch in enumerate(
-        _chunks(asset_ids, batch_size), start=1,
+        _chunks(rebuild_asset_ids, batch_size), start=1,
     ):
         prices = _certified_prices(conn, asset_batch)
         if local_snapshot is not None:
@@ -2415,12 +2773,25 @@ def _rebuild(
         if apply:
             _publish_batch(conn, batch)
         summary.absorb(batch)
+        summary.recomputed_asset_count += len(asset_batch)
+        summary.recomputed_price_row_count += len(batch.prices)
         print(
             "[total-return] "
             f"batch={batch_number} assets={len(asset_batch)} "
             f"prices={len(batch.prices)} actions={len(batch.audit)}",
             flush=True,
         )
+
+    if apply and summary.rebuild_mode == "incremental":
+        summary.appended_price_row_count = _append_unchanged_prices(
+            conn,
+            run_id=run_id,
+            affected_asset_ids=rebuild_asset_ids,
+        )
+        _refresh_incremental_summary(conn, summary, run_id)
+    elif summary.rebuild_mode == "full":
+        summary.recomputed_asset_count = summary.asset_count
+        summary.recomputed_price_row_count = summary.price_row_count
 
     if summary.cash_action_count == 0:
         raise RuntimeError(
@@ -2484,6 +2855,7 @@ def run(
         connection.commit()
         acquire_return_rebuild_lock(connection)
         rebuild_lock_acquired = True
+        baseline = _incremental_baseline(connection)
         context = repository.start_run(
             connection,
             mode="krx_total_return_rebuild",
@@ -2503,6 +2875,7 @@ def run(
                     batch_size=batch_size,
                     max_dividend_yield=max_dividend_yield,
                     run_id=context.run_id,
+                    baseline=baseline,
                 )
                 _certify_contract(connection, summary, context.run_id)
                 repository.finish_run(

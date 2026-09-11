@@ -901,10 +901,11 @@ def prepare_total_return_snapshot(
     """Build a current, complete v5 action snapshot before any Silver write.
 
     The daily task first writes its native OpenDART interval to S3.  This
-    preflight then downloads the complete historical source set, refreshes the
-    official viewer/family evidence, and builds the v5 manifest through the
-    requested calendar date.  If any source family or frozen cash-scale input
-    is incomplete, the function raises before the daily KRX price transaction.
+    preflight syncs the immutable historical source set, extends official
+    viewer/family evidence only for newly observed or touched families, and
+    builds the v5 manifest through the requested calendar date. If any source
+    family or frozen cash-scale input is incomplete, the function raises before
+    the daily KRX price transaction.
     """
     bucket = bucket or os.environ["S3_BRONZE_BUCKET"]
     root = (root or DATA_ROOT).resolve()

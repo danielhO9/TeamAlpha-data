@@ -838,15 +838,18 @@ def audit(conn=None, *, use_existing_transaction: bool = False) -> dict:
                         SELECT count(*)
                         FROM price_daily p
                         JOIN asset a ON a.asset_id=p.asset_id
+                        JOIN dq_run tr
+                          ON tr.run_id=p.total_return_quality_run_id
                         WHERE p.source='KRX'
                           AND a.asset_type='stock'
                           AND a.instrument_type='common_stock'
                           AND a.exchange='KRX'
                           AND p.market IN ('KOSPI','KOSDAQ')
                           AND p.trade_date >= %s
-                          AND p.total_return_quality_run_id=%s
+                          AND tr.status='CERTIFIED'
+                          AND tr.mode='krx_total_return_rebuild'
                         """,
-                        (CONTRACT_START, run_id),
+                        (CONTRACT_START,),
                     )
                     run_parity_count = int(cur.fetchone()[0])
             else:

@@ -2028,7 +2028,66 @@ def collect_support_action_families(
             timeout=timeout,
             request_interval_seconds=request_interval_seconds,
         )
-    entries, artifacts = _fetch_artifacts(root, snapshot, fetcher)
+    previous_entries: tuple[SupportActionFamilyEntry, ...] = ()
+    manifest_path = root / MANIFEST_RELATIVE_PATH
+    if manifest_path.is_file():
+        try:
+            previous_payload = _read_json(manifest_path)
+            previous_end = date.fromisoformat(str(
+                previous_payload.get("seed_coverage_end")
+            ))
+            if (
+                previous_payload.get("schema_version") == SCHEMA_VERSION
+                and previous_payload.get("status") == "COMPLETE"
+                and previous_payload.get("source_contract") == SOURCE_CONTRACT
+                and previous_payload.get("seed_coverage_start")
+                == coverage_start.isoformat()
+                and previous_end < coverage_end
+            ):
+                previous_entries = _parse_entries(
+                    previous_payload.get("entries")
+                )
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            previous_entries = ()
+    previous_receipts = {
+        source.receipt_no
+        for entry in previous_entries
+        for source in entry.sources
+    }
+    new_candidates = {
+        receipt: identity
+        for receipt, identity in snapshot.candidates.items()
+        if receipt not in previous_receipts
+    }
+    if previous_entries:
+        delta_snapshot = _FreshSnapshot(
+            disclosures=snapshot.disclosures,
+            structured=snapshot.structured,
+            candidates=new_candidates,
+            candidate_digest=snapshot.candidate_digest,
+            disclosure_audit=snapshot.disclosure_audit,
+        )
+        changed_entries, artifacts = _fetch_artifacts(
+            root, delta_snapshot, fetcher,
+        ) if new_candidates else ((), {})
+        changed_roots = {entry.root_receipt_no for entry in changed_entries}
+        entries = tuple(sorted(
+            [
+                entry for entry in previous_entries
+                if entry.root_receipt_no not in changed_roots
+            ] + list(changed_entries),
+            key=lambda item: (
+                item.ticker, item.action_type, item.root_receipt_no,
+            ),
+        ))
+        print(
+            "[dart-support-families] incremental evidence "
+            f"reused_families={len(previous_entries) - len(changed_roots)} "
+            f"changed_families={len(changed_entries)}",
+            flush=True,
+        )
+    else:
+        entries, artifacts = _fetch_artifacts(root, snapshot, fetcher)
     manifest = _manifest_payload(
         snapshot,
         entries,
@@ -2036,15 +2095,23 @@ def collect_support_action_families(
         coverage_end=coverage_end,
     )
     manifest_bytes = _canonical_bytes(manifest)
-    manifest_path = root / MANIFEST_RELATIVE_PATH
     previous = manifest_path.read_bytes() if manifest_path.is_file() else None
     # DART main.do is mutable.  Bodies can take long enough to collect for a
     # new correction or attachment to appear after the first selector read.
     # Re-read every declared source with the same retry/pacing-aware fetcher
     # immediately before moving the complete manifest pointer.
-    _revalidate_official_main_selectors(
-        snapshot, entries, artifacts, fetcher,
-    )
+    if artifacts:
+        changed_roots = {
+            parsed.family_root_receipt_no
+            for parsed in (item.parsed_main for item in artifacts.values())
+        }
+        revalidate_entries = tuple(
+            entry for entry in entries
+            if entry.root_receipt_no in changed_roots
+        )
+        _revalidate_official_main_selectors(
+            snapshot, revalidate_entries, artifacts, fetcher,
+        )
     try:
         if previous != manifest_bytes:
             _atomic_write(manifest_path, manifest_bytes)
