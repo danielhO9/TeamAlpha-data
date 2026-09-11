@@ -106,6 +106,31 @@ def _exclude_unmapped_corp_rows(
     return excluded_rows, sorted(excluded_keys)
 
 
+def _exclude_unmapped_full_statement_rows(
+    frames: dict[str, pd.DataFrame],
+    stats: dict[str, dict],
+    mapping: dict[str, int],
+) -> tuple[int, list[str]]:
+    """Exclude DART statement rows for tickers outside the Silver universe."""
+    name = "fundamental_statement_line"
+    frame = frames.get(name)
+    if frame is None or frame.empty:
+        return 0, []
+    mapped = frame["natural_key"].astype(str).isin(mapping)
+    missing_frame = frame.loc[~mapped]
+    missing_keys = sorted(set(missing_frame["natural_key"].astype(str)))
+    frames[name] = frame.loc[mapped].reset_index(drop=True)
+    missing_count = len(missing_frame)
+    stats[name] = dict(stats[name])
+    stats[name]["unmapped_asset_rows"] = missing_count
+    stats[name]["unmapped_asset_keys"] = missing_keys
+    stats[name]["transformed_rows"] = len(frames[name])
+    stats[name]["excluded_rows"] = (
+        int(stats[name].get("excluded_rows", 0)) + missing_count
+    )
+    return missing_count, missing_keys
+
+
 def _result(
     *,
     code: str,
@@ -258,18 +283,50 @@ def publish_files(
                 + ", ".join(result.rule_code for result in blocking)
             )
 
-        ticker_keys: set[str] = set()
-        for name in (
-            "fundamental_statement_line",
-            "investor_flow_daily",
-            "short_position_balance_observation",
-        ):
+        strict_ticker_keys: set[str] = set()
+        for name in ("investor_flow_daily", "short_position_balance_observation"):
             frame = frames.get(name)
             if frame is not None and not frame.empty:
-                ticker_keys.update(frame["natural_key"].astype(str))
+                strict_ticker_keys.update(frame["natural_key"].astype(str))
         ticker_map = _asset_map(
-            connection, ticker_keys, source="KRX", identifier_type="ticker",
+            connection,
+            strict_ticker_keys,
+            source="KRX",
+            identifier_type="ticker",
         )
+        full_statement_frame = frames.get("fundamental_statement_line")
+        full_statement_keys = (
+            set(full_statement_frame["natural_key"].astype(str))
+            if full_statement_frame is not None and not full_statement_frame.empty
+            else set()
+        )
+        ticker_map.update(_asset_map(
+            connection,
+            full_statement_keys,
+            source="KRX",
+            identifier_type="ticker",
+            require_complete=False,
+        ))
+        unmapped_statement_rows, unmapped_statement_keys = (
+            _exclude_unmapped_full_statement_rows(frames, stats, ticker_map)
+        )
+        results.append(CheckResult(
+            rule_code="ALTERNATIVE_DART_TICKER_OUTSIDE_ASSET_UNIVERSE",
+            dataset="fundamental_statement_line",
+            severity=Severity.WARNING,
+            status=(
+                CheckStatus.FAIL if unmapped_statement_rows else CheckStatus.PASS
+            ),
+            expected="all publishable DART statement rows map to Silver assets",
+            actual=(
+                f"excluded_rows={unmapped_statement_rows}, "
+                f"excluded_tickers={len(unmapped_statement_keys)}"
+            ),
+            failed_count=unmapped_statement_rows,
+            samples=[
+                {"ticker": value} for value in unmapped_statement_keys[:10]
+            ],
+        ))
         ownership_frame = frames.get("ownership_disclosure_event")
         industry_frame = frames.get("industry_classification_observation")
         corp_keys: set[str] = set()

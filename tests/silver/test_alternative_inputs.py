@@ -281,6 +281,36 @@ def test_historical_full_statement_rejections_warn_without_blocking_batch():
     assert not rejected.blocks_publish
 
 
+def test_dart_statement_rows_outside_asset_universe_are_excluded():
+    frames = {
+        "fundamental_statement_line": pd.DataFrame({
+            "natural_key": ["005930", "250030", "005930", "403360"],
+            "value": [1, 2, 3, 4],
+        }),
+    }
+    stats = {
+        "fundamental_statement_line": {
+            "input_rows": 4,
+            "transformed_rows": 4,
+            "excluded_rows": 0,
+        },
+    }
+
+    excluded_rows, excluded_keys = (
+        alternative_data._exclude_unmapped_full_statement_rows(
+            frames,
+            stats,
+            {"005930": 1},
+        )
+    )
+
+    assert excluded_rows == 2
+    assert excluded_keys == ["250030", "403360"]
+    assert frames["fundamental_statement_line"]["value"].tolist() == [1, 3]
+    assert stats["fundamental_statement_line"]["unmapped_asset_rows"] == 2
+    assert stats["fundamental_statement_line"]["excluded_rows"] == 2
+
+
 def test_short_balance_uses_first_observed_vintage(tmp_path: Path):
     source_frame = pd.DataFrame([{
         "일자": "2020-01-02",
