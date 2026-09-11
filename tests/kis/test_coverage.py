@@ -81,7 +81,24 @@ def test_daily_includes_target_even_when_prices_are_missing(monkeypatch):
     from pipeline.kis_flows import daily
     for k,v in {'KIS_FLOWS_ENABLED':'1','KIS_UNIVERSE_URI':'m','KIS_POLICY_URI':'p','KIS_BRONZE_ROOT':'r'}.items():
         monkeypatch.setenv(k,v)
-    with patch('pipeline.kis_flows.read_json',return_value={'as_of':str(D)}),patch('pipeline.kis_flows.run',return_value={'failures':[]}) as collect:
+    with patch('pipeline.kis_flows.read_json',side_effect=[{'version':'v','availability_lag_calendar_days':1,'availability_hour_kst':8,'short_market':'UNKNOWN'},{'as_of':str(D)}]),patch('pipeline.kis_flows.run',return_value={'failures':[]}) as collect:
         daily('20260910',conn=object())
         assert collect.call_args.kwargs['end']==D
         assert collect.call_args.kwargs['start']==date(2026,9,4)
+
+
+def test_calendar_exclusion_requires_evidence():
+    from pipeline.kis_flows import checked_policy
+    p={'version':'v','availability_lag_calendar_days':1,'availability_hour_kst':8,'short_market':'UNKNOWN','calendar_exclusions':[{'date':'2026-07-17'}]}
+    with pytest.raises(ValueError,match='calendar exclusion'):
+        checked_policy(p)
+
+
+def test_daily_excludes_verified_special_holiday(monkeypatch):
+    from pipeline.kis_flows import daily
+    for k,v in {'KIS_FLOWS_ENABLED':'1','KIS_UNIVERSE_URI':'m','KIS_POLICY_URI':'p','KIS_BRONZE_ROOT':'r'}.items():
+        monkeypatch.setenv(k,v)
+    policy={'version':'v','availability_lag_calendar_days':1,'availability_hour_kst':8,'short_market':'UNKNOWN','calendar_exclusions':[{'date':'2026-07-17','evidence':'official holiday notice'}]}
+    with patch('pipeline.kis_flows.read_json',side_effect=[policy,{'as_of':'2026-07-16'}]),patch('pipeline.kis_flows.run',return_value={'failures':[]}) as collect:
+        daily('20260717',conn=object())
+        assert collect.call_args.kwargs['end']==date(2026,7,16)

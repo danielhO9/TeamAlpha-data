@@ -54,14 +54,15 @@ def read_json(uri):
     return json.loads(raw)
 
 
-def expected_partitions(conn, manifest, start, end):
+def expected_partitions(conn, manifest, start, end, calendar_exclusions=()):
     """Build expectations independently of price/identifier availability."""
     import exchange_calendars as xcals
     ids = manifest['asset_ids']
     if not ids or len(ids) != len(set(ids)):
         raise ValueError('empty or duplicate universe')
     calendar = xcals.get_calendar('XKRX', start=str(start-timedelta(days=7)), end=str(end+timedelta(days=7)))
-    sessions = [v.date() for v in calendar.sessions_in_range(str(start), str(end))]
+    closed = {date.fromisoformat(r['date']) for r in calendar_exclusions}
+    sessions = [v.date() for v in calendar.sessions_in_range(str(start), str(end)) if v.date() not in closed]
     try:
         with conn.cursor() as cur:
             cur.execute('SELECT asset_id,listed_from,listed_to FROM asset WHERE asset_id=ANY(%s)', (ids,))
@@ -111,12 +112,12 @@ def market_plan(dates, venues):
 
 def nxt_dates(manifest, aid, dates):
     eligible=[]; ineligible=[]
+    intervals=[(date.fromisoformat(r['start']),date.fromisoformat(r['end']),r)
+               for r in manifest.get('nxt_intervals', []) if int(r['asset_id'])==aid]
     for day in dates:
         if day < NXT_START:
             continue
-        matches=[r for r in manifest.get('nxt_intervals', [])
-                 if int(r['asset_id'])==aid
-                 and date.fromisoformat(r['start'])<=day<=date.fromisoformat(r['end'])]
+        matches=[r for start,end,r in intervals if start<=day<=end]
         if len(matches)!=1 or not matches[0].get('evidence'):
             raise ValueError(f'NXT eligibility unknown/ambiguous: asset={aid}, date={day}')
         status=matches[0]['status']
@@ -139,6 +140,10 @@ def checked_policy(policy):
         raise ValueError('short market scope requires evidence reference')
     if policy['short_market']=='KRX':
         date.fromisoformat(policy['short_market_verified_through'])
+    for exclusion in policy.get('calendar_exclusions',[]):
+        date.fromisoformat(exclusion['date'])
+        if not exclusion.get('evidence'):
+            raise ValueError('calendar exclusion requires evidence')
     venues=policy.get('venues',['J','NX','UN'])
     if not venues or len(set(venues))!=len(venues) or not set(venues)<= {'J','NX','UN'}:
         raise ValueError('invalid requested venues')
@@ -174,7 +179,7 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
     policy=checked_policy(read_json(policy_uri))
     if publish:
         migrate.assert_current(conn)
-    partitions=expected_partitions(conn,manifest,start,end)
+    partitions=expected_partitions(conn,manifest,start,end,policy.get('calendar_exclusions',[]))
     client=client or Client(root)
     summary={'partitions':len(partitions),'published':0,'bronze_only':not publish,'failures':[],
              'universe_as_of':manifest['as_of'],'universe_hash':claimed,
@@ -245,7 +250,9 @@ def daily(day, *, conn):
     target=datetime.strptime(day,'%Y%m%d').date()
     import exchange_calendars as xcals
     calendar=xcals.get_calendar('XKRX',start=str(target-timedelta(days=30)),end=str(target+timedelta(days=7)))
-    dates=[v.date() for v in calendar.sessions_in_range(str(target-timedelta(days=30)),str(target))][-5:]
+    policy=checked_policy(read_json(os.environ['KIS_POLICY_URI']))
+    closed={date.fromisoformat(r['date']) for r in policy.get('calendar_exclusions',[])}
+    dates=[v.date() for v in calendar.sessions_in_range(str(target-timedelta(days=30)),str(target)) if v.date() not in closed][-5:]
     if len(dates)<5:raise RuntimeError('five market sessions required')
     manifest=read_json(os.environ['KIS_UNIVERSE_URI'])
     if (target-date.fromisoformat(manifest['as_of'])).days>40:
