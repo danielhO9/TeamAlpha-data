@@ -33,29 +33,18 @@ WITH certified_prices AS (
     ) identifier ON true
     WHERE p.source = 'KRX'
       AND p.market IN ('KOSPI', 'KOSDAQ')
-      AND p.trade_date < (%(end_month)s::date + interval '1 month')
-), monthly AS (
-    SELECT
-        certified_prices.*,
-        min(trade_date) OVER () AS dataset_start,
-        row_number() OVER (
-            PARTITION BY asset_id, date_trunc('month', trade_date)
-            ORDER BY trade_date DESC
-        ) AS month_rank
-    FROM certified_prices
+      AND p.trade_date <= %(end_date)s::date
 ), universe AS (
     SELECT
         asset_id,
         trade_date AS as_of_date,
-        date_trunc('month', trade_date) AS signal_month
-    FROM monthly
-    WHERE month_rank = 1
-      AND date_trunc('month', trade_date)
-          BETWEEN %(start_month)s::date AND %(end_month)s::date
+        trade_date AS signal_date
+    FROM certified_prices
+    WHERE trade_date BETWEEN %(start_date)s::date AND %(end_date)s::date
       AND instrument_type = 'common_stock'
       AND name !~* '(스팩|SPAC)'
       AND position('리츠' in name) = 0
-      AND (age_days >= 250 OR first_seen = dataset_start)
+      AND age_days >= 250
       AND market_cap > 0
       AND total_return_close > 0
 ), universe_state AS (
@@ -235,7 +224,7 @@ WITH certified_prices AS (
     WHERE ta.total_assets - cl.current_liabilities > 0
 ), raw_values AS (
     SELECT
-        u.asset_id, u.as_of_date, u.signal_month, s.value
+        u.asset_id, u.as_of_date, u.signal_date, s.value
     FROM universe_state u
     JOIN state_values s
       ON s.asset_id = u.asset_id
@@ -243,7 +232,7 @@ WITH certified_prices AS (
 ), ranked AS (
     SELECT
         asset_id, as_of_date, value,
-        rank() OVER (PARTITION BY signal_month ORDER BY value DESC) AS rank
+        rank() OVER (PARTITION BY signal_date ORDER BY value DESC) AS rank
     FROM raw_values
     WHERE value IS NOT NULL
 )

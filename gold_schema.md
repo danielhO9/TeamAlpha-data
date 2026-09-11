@@ -28,7 +28,7 @@ Gold는 별도 RDS를 만들지 않고 기존 Silver RDS의 같은 PostgreSQL da
 | `asset_id` | Silver `public.asset` 종목 ID |
 | `as_of_date` | 값이 투자 판단에 사용 가능한 PIT 날짜 |
 | `value` | 방향을 적용하지 않은 팩터 원값(raw value) |
-| `rank` | `score = value × predicted_sign`을 내림차순으로 매긴 signal month 단면 순위 |
+| `rank` | `score = value × predicted_sign`을 내림차순으로 매긴 거래일 단면 순위 |
 
 기본키는 `(factor_id, asset_id, as_of_date)`다. APPROVED 상태인 팩터만 값을
 적재할 수 있다. `predicted_sign=-1`이어도 `value`는 부호를 뒤집지 않고, raw value가
@@ -113,17 +113,27 @@ DDL은 idempotent하며 `gold.active_factor_catalog` view는 현재 `APPROVED`�
 read-only SQL로 계산한다. manifest는 연구 definition hash를 명시하며, 실행기는 APPROVED
 상태, 실제 SQL SHA-256, 게시 config와 manifest의 definition hash, `predicted_sign`,
 value/rank 계약을 모두 확인한다. 연구 parity와 운영 적재는 같은 query를 사용하고 운영
-실행기만 공통 INSERT/UPSERT를 덧붙인다.
+실행기만 날짜 파티션의 원자적 교체를 덧붙인다.
+
+일별 v2 메타데이터는 기존 월별 버전을 덮어쓰지 않고 `CANDIDATE`로 별도 등록한다.
+
+```bash
+uv run python -m pipeline.gold.register_daily        # rollback 검증
+uv run python -m pipeline.gold.register_daily --apply
+```
 
 ```bash
 # SQL과 계약을 검증하고 실행하되 마지막에 rollback
 uv run python -m pipeline.gold.run \
-  --factor trading_turnover_20d --as-of-month YYYY-MM
+  --factor trading_turnover_20d --as-of-date YYYY-MM-DD
 
 # 명시적 승인 후에만 실제 적재
 uv run python -m pipeline.gold.run \
-  --factor trading_turnover_20d --as-of-month YYYY-MM --apply
+  --factor trading_turnover_20d --as-of-date YYYY-MM-DD --apply
 ```
 
-두 SQL 모두 인증된 RDS Silver 행과 PIT 식별자·공시만 사용한다. Gold 실행은 연구의
-봉인 OOS 통과와 사람 승인 뒤 별도로 수행하며 daily task에 자동 연결하지 않는다.
+일별 v2 SQL은 인증된 RDS Silver 행과 PIT 식별자·공시만 사용하고 거래일마다 전체
+유니버스의 값과 순위를 만든다. `--from-date`/`--to-date` 범위 실행도 지원하며 대상
+날짜 파티션은 한 트랜잭션에서 완전히 교체한다. Gold 실행은 연구의 봉인 OOS 통과와
+사람 승인 뒤 수행한다. Silver 재무제표 초기 적재가 끝나기 전에는 daily task에
+자동 연결하지 않는다.

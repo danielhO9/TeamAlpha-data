@@ -1,8 +1,8 @@
 -- market_leverage Gold implementation.
--- value = PIT total non-common-equity liabilities / month-end market equity.
+-- value = PIT total non-common-equity liabilities / daily market equity.
 -- predicted_sign = +1, therefore rank 1 is the highest raw value.
 -- The query replays certified DART revisions available at each closed signal
--- month and never reads fundamental_current or a Gold relation.
+-- date and never reads fundamental_current or a Gold relation.
 WITH certified_prices AS (
     SELECT
         p.asset_id, a.name, a.instrument_type, p.trade_date,
@@ -32,35 +32,24 @@ WITH certified_prices AS (
     ) identifier ON true
     WHERE p.source = 'KRX'
       AND p.market IN ('KOSPI', 'KOSDAQ')
-      AND p.trade_date < (%(end_month)s::date + interval '1 month')
-), monthly AS (
-    SELECT
-        certified_prices.*,
-        min(trade_date) OVER () AS dataset_start,
-        row_number() OVER (
-            PARTITION BY asset_id, date_trunc('month', trade_date)
-            ORDER BY trade_date DESC
-        ) AS month_rank
-    FROM certified_prices
+      AND p.trade_date <= %(end_date)s::date
 ), universe AS (
     SELECT
         asset_id,
         trade_date AS as_of_date,
-        date_trunc('month', trade_date) AS signal_month,
+        trade_date AS signal_date,
         market_cap::double precision AS market_cap
-    FROM monthly
-    WHERE month_rank = 1
-      AND date_trunc('month', trade_date)
-          BETWEEN %(start_month)s::date AND %(end_month)s::date
+    FROM certified_prices
+    WHERE trade_date BETWEEN %(start_date)s::date AND %(end_date)s::date
       AND instrument_type = 'common_stock'
       AND name !~* '(스팩|SPAC)'
       AND position('리츠' in name) = 0
-      AND (age_days >= 250 OR first_seen = dataset_start)
+      AND age_days >= 250
       AND market_cap > 0
       AND total_return_close > 0
 ), revisions AS (
     SELECT
-        u.asset_id, u.as_of_date, u.signal_month, u.market_cap,
+        u.asset_id, u.as_of_date, u.signal_date, u.market_cap,
         f.period_end, f.fiscal_period, f.value,
         f.fs_type, f.available_date, f.revision_key,
         row_number() OVER (
@@ -102,7 +91,7 @@ WITH certified_prices AS (
     WHERE revision_rank = 1
 ), raw_values AS (
     SELECT
-        asset_id, as_of_date, signal_month,
+        asset_id, as_of_date, signal_date,
         value::double precision / market_cap AS value
     FROM latest_metric
     WHERE metric_rank = 1
@@ -110,7 +99,7 @@ WITH certified_prices AS (
 ), ranked AS (
     SELECT
         asset_id, as_of_date, value,
-        rank() OVER (PARTITION BY signal_month ORDER BY value DESC) AS rank
+        rank() OVER (PARTITION BY signal_date ORDER BY value DESC) AS rank
     FROM raw_values
 )
 SELECT asset_id, as_of_date, value, rank

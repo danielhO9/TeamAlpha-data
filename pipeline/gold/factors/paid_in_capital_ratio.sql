@@ -1,7 +1,7 @@
 -- paid_in_capital_ratio Gold implementation.
 -- value = PIT 법정 자본금 / PIT 자기자본 (자기자본 > 0)
 -- predicted_sign = -1, 따라서 rank 1은 raw value가 가장 낮은 종목이다.
--- fundamental_current는 사용하지 않고 닫힌 signal month 범위의 종목별 월말 거래일로
+-- fundamental_current는 사용하지 않고 닫힌 거래일 범위의 종목별 PIT 날짜로
 -- DART revision을 재생한다. 두 지표의 최신 회계기간은 독립적으로 선택한다.
 WITH certified_prices AS (
     SELECT
@@ -32,33 +32,23 @@ WITH certified_prices AS (
     ) identifier ON true
     WHERE p.source = 'KRX'
       AND p.market IN ('KOSPI', 'KOSDAQ')
-), monthly AS (
-    SELECT
-        certified_prices.*,
-        min(trade_date) OVER () AS dataset_start,
-        row_number() OVER (
-            PARTITION BY asset_id, date_trunc('month', trade_date)
-            ORDER BY trade_date DESC
-        ) AS month_rank
-    FROM certified_prices
+      AND p.trade_date <= %(end_date)s::date
 ), universe AS (
     SELECT
         asset_id,
         trade_date AS as_of_date,
-        date_trunc('month', trade_date) AS signal_month
-    FROM monthly
-    WHERE month_rank = 1
-      AND date_trunc('month', trade_date)
-          BETWEEN %(start_month)s::date AND %(end_month)s::date
+        trade_date AS signal_date
+    FROM certified_prices
+    WHERE trade_date BETWEEN %(start_date)s::date AND %(end_date)s::date
       AND instrument_type = 'common_stock'
       AND name !~* '(스팩|SPAC)'
       AND position('리츠' in name) = 0
-      AND (age_days >= 250 OR first_seen = dataset_start)
+      AND age_days >= 250
       AND market_cap > 0
       AND total_return_close > 0
 ), revisions AS (
     SELECT
-        u.asset_id, u.as_of_date, u.signal_month,
+        u.asset_id, u.as_of_date, u.signal_date,
         f.period_end, f.fiscal_period, f.metric, f.value,
         f.fs_type, f.available_date, f.revision_key,
         row_number() OVER (
@@ -97,7 +87,7 @@ WITH certified_prices AS (
     WHERE revision_rank = 1
 ), pivoted AS (
     SELECT
-        asset_id, as_of_date, signal_month,
+        asset_id, as_of_date, signal_date,
         max(value) FILTER (
             WHERE metric = 'capital_stock' AND metric_rank = 1
         )::double precision AS capital_stock,
@@ -105,10 +95,10 @@ WITH certified_prices AS (
             WHERE metric = 'total_equity' AND metric_rank = 1
         )::double precision AS total_equity
     FROM latest_metric
-    GROUP BY asset_id, as_of_date, signal_month
+    GROUP BY asset_id, as_of_date, signal_date
 ), raw_values AS (
     SELECT
-        asset_id, as_of_date, signal_month,
+        asset_id, as_of_date, signal_date,
         capital_stock / total_equity AS value
     FROM pivoted
     WHERE capital_stock IS NOT NULL
@@ -117,7 +107,7 @@ WITH certified_prices AS (
     SELECT
         asset_id, as_of_date, value,
         rank() OVER (
-            PARTITION BY signal_month ORDER BY value ASC
+            PARTITION BY signal_date ORDER BY value ASC
         ) AS rank
     FROM raw_values
 )

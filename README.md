@@ -441,9 +441,11 @@ rank  = 같은 as_of_date KOSPI·KOSDAQ 유니버스 내 내림차순 순위
 
 구현은 [`pipeline/gold/factors/`](pipeline/gold/factors/)의 allowlist된 read-only SQL에
 있습니다. 연구 단계에서는 이 쿼리를 Python 정의와 대조하고, 운영 실행기는 검증된 동일 쿼리에
-공통 INSERT/UPSERT를 감쌉니다. `python -m pipeline.gold.run --factor <key>
---as-of-month YYYY-MM`은 `--apply`가 없으면 rollback합니다. Gold는 현재 daily task에
-자동으로 연결하지 않고 봉인 OOS 통과와 사람 승인 뒤 명시적으로 실행합니다.
+공통 날짜 파티션 교체를 감쌉니다. `python -m pipeline.gold.run --factor <key>
+--as-of-date YYYY-MM-DD` 또는 `--from-date`/`--to-date`는 `--apply`가 없으면
+rollback합니다. 일별 v2는 거래일마다 전체 유니버스를 다시 랭킹합니다. Gold는
+Silver 재무제표 초기 적재, 봉인 OOS 통과와 사람 승인이 끝난 뒤 daily task에
+연결합니다.
 
 상세 설계와 DDL은 [gold_schema.md](gold_schema.md),
 [sql/gold_schema.sql](sql/gold_schema.sql)을 참고합니다.
