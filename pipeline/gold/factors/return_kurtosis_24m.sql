@@ -54,8 +54,8 @@ WITH certified AS (
     SELECT
         t.asset_id, t.trade_date AS as_of_date,
         t.trade_date AS signal_date,
-        window.window_rows, window.n, window.sample_variance,
-        window.fourth_sum
+        stats.window_rows, stats.n, stats.sample_variance,
+        stats.fourth_sum
     FROM targets t
     JOIN LATERAL (
         SELECT
@@ -79,7 +79,7 @@ WITH certified AS (
                 LIMIT 504
             ) observations
         ) sample
-    ) window ON true
+    ) stats ON true
 ), raw_values AS (
     SELECT
         asset_id, as_of_date, signal_date,
