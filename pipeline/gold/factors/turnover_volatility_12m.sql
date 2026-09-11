@@ -1,6 +1,6 @@
 -- turnover_volatility_12m daily Gold implementation.
 -- value = 최근 252 KRX 거래일 log(ADV20 / market_cap)의 표본표준편차.
--- 최소 189개(75%) 유효 관측치를 요구한다.
+-- 최소 189개(75 percent) 유효 관측치를 요구한다.
 -- predicted_sign = -1, 따라서 rank 1은 raw value가 가장 낮은 종목이다.
 WITH certified AS (
     SELECT

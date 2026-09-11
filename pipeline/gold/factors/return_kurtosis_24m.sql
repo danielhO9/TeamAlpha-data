@@ -1,7 +1,7 @@
 -- return_kurtosis_24m daily Gold implementation.
 -- value = 최근 504 KRX 거래일 total_return_close 일수익률의
 -- pandas-compatible unbiased Fisher excess kurtosis.
--- 최소 378개(75%) 유효 수익률을 요구한다.
+-- 최소 378개(75 percent) 유효 수익률을 요구한다.
 -- predicted_sign = -1, 따라서 rank 1은 raw value가 가장 낮은 종목이다.
 WITH certified AS (
     SELECT
