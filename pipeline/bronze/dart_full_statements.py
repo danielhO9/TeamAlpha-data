@@ -15,10 +15,12 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import requests
 
@@ -27,6 +29,8 @@ from pipeline.common.paths import base_uri
 from pipeline.common.sink import exists, read_bytes, write_bytes, write_text_if_changed
 
 ENDPOINT = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+BOOTSTRAP_STATE_KEY = "quality/checkpoints/dart-full-bootstrap-v1.json"
+BOOTSTRAP_STATE_SCHEMA = "dart-full-bootstrap-state-v1"
 _MAJOR_KEY_RE = re.compile(
     r"financials/dart/year=(?P<year>\d{4})/corp=(?P<ticker>[0-9A-Z]{6})/"
     r"(?P<report>11011|11012|11013|11014)\.json$"
@@ -35,6 +39,24 @@ _MAJOR_KEY_RE = re.compile(
 
 class DartRequestError(RuntimeError):
     """Secret-free OpenDART request failure."""
+
+
+class _RequestPacer:
+    """Keep request starts globally spaced while network waits overlap."""
+
+    def __init__(self, gap_seconds: float):
+        self.gap_seconds = max(0.0, gap_seconds)
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next_start - now
+            if delay > 0:
+                time.sleep(delay)
+                now = time.monotonic()
+            self._next_start = now + self.gap_seconds
 
 
 def _api_key() -> str:
@@ -172,6 +194,7 @@ def _request_scope(
     fs_type: str,
     *,
     tries: int = 4,
+    before_request: Callable[[], None] | None = None,
 ) -> tuple[bytes, dict]:
     params = {
         "crtfc_key": _api_key(),
@@ -183,6 +206,8 @@ def _request_scope(
     failure: tuple[str, int | None] | None = None
     for attempt in range(tries):
         try:
+            if before_request is not None:
+                before_request()
             response = requests.get(ENDPOINT, params=params, timeout=60)
             response.raise_for_status()
             payload = response.json()
@@ -402,7 +427,6 @@ def _collect_scopes(
         if known_objects is not None
         else {}
     )
-    corp_by_stock: dict[str, str] | None = None
     print(
         f"[dart-full-statements] scopes={len(scopes)} "
         f"dest={dest} refresh={refresh_existing}",
@@ -410,6 +434,7 @@ def _collect_scopes(
     )
     responses: list[str] = []
     fetched = skipped = reused_legacy = 0
+    pending: list[tuple[int, tuple[str, int, str, str], str | None]] = []
     for index, (ticker, year, report_code, fs_type) in enumerate(scopes, 1):
         root = _scope_root(base, ticker, year, report_code, fs_type)
         pointer_uri = f"{root}/latest.json"
@@ -437,24 +462,40 @@ def _collect_scopes(
                 responses.append(promoted)
                 reused_legacy += 1
                 continue
-        if corp_by_stock is None:
-            corp_by_stock = {
-                stock_code: corp_code
-                for corp_code, stock_code
-                in financials.ensure_corp_code_xml(base)
-            }
+        pending.append((
+            index, (ticker, year, report_code, fs_type), previous,
+        ))
+
+    if not pending:
+        return sorted(set(responses))
+
+    corp_by_stock = {
+        stock_code: corp_code
+        for corp_code, stock_code in financials.ensure_corp_code_xml(base)
+    }
+    workers = int(os.environ.get("DART_FULL_STATEMENT_WORKERS", "3"))
+    if not 1 <= workers <= 8:
+        raise ValueError("DART_FULL_STATEMENT_WORKERS must be between 1 and 8")
+    pacer = _RequestPacer(financials.CALL_GAP_SEC)
+
+    def fetch_one(item):
+        index, scope, previous = item
+        ticker, year, report_code, fs_type = scope
+        root = _scope_root(base, ticker, year, report_code, fs_type)
         corp_code = corp_by_stock.get(ticker)
         if corp_code is None:
             raise RuntimeError(f"DART corp code missing for ticker={ticker}")
-        body, payload = _request_scope(corp_code, year, report_code, fs_type)
+        body, payload = _request_scope(
+            corp_code,
+            year,
+            report_code,
+            fs_type,
+            before_request=pacer.wait,
+        )
         digest = hashlib.sha256(body).hexdigest()
         response_uri = f"{root}/sha256={digest}/response.json"
         if previous == response_uri:
-            if not changed_only:
-                responses.append(previous)
-            skipped += 1
-            time.sleep(financials.CALL_GAP_SEC)
-            continue
+            return index, previous if not changed_only else None, "skipped"
         write_bytes(body, response_uri)
         filing_ids = sorted({
             str(row.get("rcept_no") or "").strip()
@@ -476,16 +517,44 @@ def _collect_scopes(
         write_text_if_changed(
             json.dumps(pointer, ensure_ascii=False, sort_keys=True), pointer_uri,
         )
-        responses.append(response_uri)
-        fetched += 1
-        if index % 100 == 0 or index == len(scopes):
+        return index, response_uri, "fetched"
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = [executor.submit(fetch_one, item) for item in pending]
+    completed = len(scopes) - len(pending)
+    try:
+        for future in as_completed(futures):
+            _index, response_uri, outcome = future.result()
+            completed += 1
+            if response_uri is not None:
+                responses.append(response_uri)
+            if outcome == "fetched":
+                fetched += 1
+            else:
+                skipped += 1
+            if completed % 100 == 0 or completed == len(scopes):
+                print(
+                    f"[dart-full-statements] {completed}/{len(scopes)} "
+                    f"fetched={fetched} skipped={skipped} "
+                    f"reused_legacy={reused_legacy}",
+                    flush=True,
+                )
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+    if completed and completed < 100:
+        if completed == len(scopes):
             print(
-                f"[dart-full-statements] {index}/{len(scopes)} "
+                f"[dart-full-statements] {completed}/{len(scopes)} "
                 f"fetched={fetched} skipped={skipped} "
                 f"reused_legacy={reused_legacy}",
                 flush=True,
             )
-        time.sleep(financials.CALL_GAP_SEC)
     return sorted(set(responses))
 
 
@@ -553,6 +622,51 @@ def run_incremental_day(day: str, dest: str) -> list[str]:
     return run_incremental(sorted(major_files), dest)
 
 
+def _bootstrap_state_uri(base: str) -> str:
+    return f"{base}/{BOOTSTRAP_STATE_KEY}"
+
+
+def _read_bootstrap_state(base: str) -> dict | None:
+    raw = read_bytes(_bootstrap_state_uri(base))
+    if raw is None:
+        return None
+    state = json.loads(raw.decode("utf-8"))
+    if state.get("schema_version") != BOOTSTRAP_STATE_SCHEMA:
+        raise RuntimeError("invalid DART full-statement bootstrap state schema")
+    if state.get("status") not in {"COLLECTING", "COLLECTED", "CERTIFIED"}:
+        raise RuntimeError("invalid DART full-statement bootstrap state status")
+    scopes = state.get("scopes")
+    if not isinstance(scopes, list) or any(
+        not isinstance(scope, list) or len(scope) != 4 for scope in scopes
+    ):
+        raise RuntimeError("invalid DART full-statement bootstrap scopes")
+    return state
+
+
+def _write_bootstrap_state(base: str, state: dict) -> None:
+    write_text_if_changed(
+        json.dumps(state, ensure_ascii=False, sort_keys=True),
+        _bootstrap_state_uri(base),
+    )
+
+
+def mark_bootstrap_batch_certified(dest: str, files: list[str]) -> None:
+    """Advance the initial-load checkpoint only after the DB commit succeeds."""
+    base = base_uri(dest)
+    state = _read_bootstrap_state(base)
+    if state is None or state.get("status") != "COLLECTED":
+        raise RuntimeError("no collected DART full-statement batch to certify")
+    expected_count = len(state["scopes"])
+    if len(set(files)) != expected_count:
+        raise RuntimeError(
+            "DART full-statement certification file count does not match "
+            f"checkpoint: files={len(set(files))} scopes={expected_count}"
+        )
+    state["status"] = "CERTIFIED"
+    state["certified_at"] = datetime.now(timezone.utc).isoformat()
+    _write_bootstrap_state(base, state)
+
+
 def run_bootstrap_batch(
     from_year: int,
     to_year: int,
@@ -566,21 +680,55 @@ def run_bootstrap_batch(
     if from_year < 2015 or to_year < from_year:
         raise ValueError("OpenDART full statements require 2015 <= from_year <= to_year")
     base = base_uri(dest)
-    scopes = sorted(
-        discover_scopes(base, from_year, to_year),
-        key=lambda value: (-value[1], value[0], value[2], value[3]),
-    )
-    known_objects = _s3_inventory(base)
-    pending = [
-        scope for scope in scopes
-        if f"{_scope_root(base, *scope)}/latest.json" not in known_objects
-    ]
-    selected = pending[:max_scopes]
-    print(
-        f"[dart-full-bootstrap] total={len(scopes)} pending={len(pending)} "
-        f"selected={len(selected)}",
-        flush=True,
-    )
+    state = _read_bootstrap_state(base)
+    if state is not None and state["status"] in {"COLLECTING", "COLLECTED"}:
+        if state.get("from_year") != from_year or state.get("to_year") != to_year:
+            raise RuntimeError(
+                "unfinished DART full-statement batch has a different year range"
+            )
+        selected = [tuple(scope) for scope in state["scopes"]]
+        remaining = int(state["remaining_scopes"])
+        print(
+            f"[dart-full-bootstrap] resuming status={state['status']} "
+            f"selected={len(selected)} remaining={remaining}",
+            flush=True,
+        )
+        known_objects = _s3_inventory(base)
+    else:
+        scopes = sorted(
+            discover_scopes(base, from_year, to_year),
+            key=lambda value: (-value[1], value[0], value[2], value[3]),
+        )
+        known_objects = _s3_inventory(base)
+        pending = [
+            scope for scope in scopes
+            if f"{_scope_root(base, *scope)}/latest.json" not in known_objects
+        ]
+        selected = pending[:max_scopes]
+        remaining = max(0, len(pending) - len(selected))
+        print(
+            f"[dart-full-bootstrap] total={len(scopes)} pending={len(pending)} "
+            f"selected={len(selected)}",
+            flush=True,
+        )
+        if selected:
+            canonical_scopes = [list(scope) for scope in selected]
+            batch_id = hashlib.sha256(json.dumps(
+                canonical_scopes, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            state = {
+                "schema_version": BOOTSTRAP_STATE_SCHEMA,
+                "status": "COLLECTING",
+                "batch_id": batch_id,
+                "from_year": from_year,
+                "to_year": to_year,
+                "scopes": canonical_scopes,
+                "remaining_scopes": remaining,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _write_bootstrap_state(base, state)
+    if not selected:
+        return [], remaining
     responses = _collect_scopes(
         base,
         selected,
@@ -589,7 +737,18 @@ def run_bootstrap_batch(
         changed_only=False,
         known_objects=known_objects,
     )
-    return responses, max(0, len(pending) - len(selected))
+    if len(responses) != len(selected):
+        raise RuntimeError(
+            "DART full-statement collection did not produce one response per "
+            f"scope: responses={len(responses)} scopes={len(selected)}"
+        )
+    state = _read_bootstrap_state(base)
+    if state is None:
+        raise RuntimeError("DART full-statement bootstrap state disappeared")
+    state["status"] = "COLLECTED"
+    state["collected_at"] = datetime.now(timezone.utc).isoformat()
+    _write_bootstrap_state(base, state)
+    return responses, remaining
 
 
 def main() -> None:

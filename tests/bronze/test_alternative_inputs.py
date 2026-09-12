@@ -1,5 +1,6 @@
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -122,7 +123,9 @@ def test_full_statement_incremental_discovers_only_explicit_changed_files(
     ]
 
 
-def test_full_statement_bootstrap_selects_recent_pending_scopes(monkeypatch):
+def test_full_statement_bootstrap_selects_recent_pending_scopes(
+    monkeypatch, tmp_path: Path,
+):
     scopes = [
         ("005930", 2024, "11011", "CFS"),
         ("000660", 2026, "11012", "CFS"),
@@ -130,6 +133,9 @@ def test_full_statement_bootstrap_selects_recent_pending_scopes(monkeypatch):
     ]
     monkeypatch.setattr(
         dart_full_statements, "discover_scopes", lambda *_args: scopes,
+    )
+    monkeypatch.setattr(
+        dart_full_statements, "base_uri", lambda _dest: str(tmp_path),
     )
     monkeypatch.setattr(dart_full_statements, "_s3_inventory", lambda _base: set())
     captured = {}
@@ -146,6 +152,90 @@ def test_full_statement_bootstrap_selects_recent_pending_scopes(monkeypatch):
     assert captured["scopes"] == [scopes[1], scopes[2]]
     assert files == ["one.json", "two.json"]
     assert remaining == 1
+    state = json.loads((
+        tmp_path / dart_full_statements.BOOTSTRAP_STATE_KEY
+    ).read_text())
+    assert state["status"] == "COLLECTED"
+
+    dart_full_statements.mark_bootstrap_batch_certified("local", files)
+    state = json.loads((
+        tmp_path / dart_full_statements.BOOTSTRAP_STATE_KEY
+    ).read_text())
+    assert state["status"] == "CERTIFIED"
+
+
+def test_full_statement_bootstrap_resumes_unpublished_batch(
+    monkeypatch, tmp_path: Path,
+):
+    selected = [["005930", 2026, "11012", "CFS"]]
+    state_path = tmp_path / dart_full_statements.BOOTSTRAP_STATE_KEY
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({
+        "schema_version": dart_full_statements.BOOTSTRAP_STATE_SCHEMA,
+        "status": "COLLECTING",
+        "batch_id": "batch",
+        "from_year": 2015,
+        "to_year": 2026,
+        "scopes": selected,
+        "remaining_scopes": 12,
+    }))
+    monkeypatch.setattr(
+        dart_full_statements, "base_uri", lambda _dest: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        dart_full_statements, "discover_scopes",
+        lambda *_args: pytest.fail("must resume before discovering a new batch"),
+    )
+    monkeypatch.setattr(dart_full_statements, "_s3_inventory", lambda _base: set())
+    captured = {}
+
+    def collect(_base, scopes, **_kwargs):
+        captured["scopes"] = scopes
+        return ["response.json"]
+
+    monkeypatch.setattr(dart_full_statements, "_collect_scopes", collect)
+    files, remaining = dart_full_statements.run_bootstrap_batch(
+        2015, 2026, "local", max_scopes=9000,
+    )
+
+    assert captured["scopes"] == [tuple(selected[0])]
+    assert files == ["response.json"]
+    assert remaining == 12
+    assert json.loads(state_path.read_text())["status"] == "COLLECTED"
+
+
+def test_full_statement_requests_overlap_with_bounded_workers(
+    monkeypatch, tmp_path: Path,
+):
+    scopes = [
+        (f"{index:06d}", 2026, "11012", "CFS") for index in range(3)
+    ]
+    monkeypatch.setenv("DART_FULL_STATEMENT_WORKERS", "3")
+    monkeypatch.setattr(dart_full_statements.financials, "CALL_GAP_SEC", 0)
+    monkeypatch.setattr(
+        dart_full_statements.financials,
+        "ensure_corp_code_xml",
+        lambda _base: [(f"corp-{index}", f"{index:06d}") for index in range(3)],
+    )
+    barrier = threading.Barrier(3)
+    thread_ids: set[int] = set()
+
+    def request(corp_code, *_args, before_request=None, **_kwargs):
+        if before_request:
+            before_request()
+        thread_ids.add(threading.get_ident())
+        barrier.wait(timeout=2)
+        body = json.dumps({"list": []}).encode()
+        return body, {"status": "000", "list": []}
+
+    monkeypatch.setattr(dart_full_statements, "_request_scope", request)
+    responses = dart_full_statements._collect_scopes(
+        str(tmp_path), scopes, dest="local", refresh_existing=False,
+        changed_only=False, known_objects=set(),
+    )
+
+    assert len(responses) == 3
+    assert len(thread_ids) == 3
 
 
 def test_ownership_snapshot_fetches_every_page(monkeypatch):

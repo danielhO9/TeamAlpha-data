@@ -650,7 +650,7 @@ RDS transaction을 순차 실행한다.
 uv run python -m pipeline.alternative_data_backfill_ecs \
   --phase full --from 2015 --to 2026
 uv run python -m pipeline.alternative_data_backfill_ecs --phase silver
-# 대규모 전체 재무 원문은 최근 연도부터 4,000 scope씩 수집·인증
+# 대규모 전체 재무 원문은 최근 연도부터 bounded scope로 수집·인증
 uv run python -m pipeline.alternative_data_backfill_ecs \
   --phase full-statement-batch --from 2015 --to 2026 --max-scopes 4000
 ```
@@ -699,6 +699,15 @@ python -m pipeline.silver.short_sales \
 회사를 20개 shard로 나눠 영업일마다 한 shard만 확인하고, 실제 응답 hash가 바뀐
 관측값만 Silver에 추가한다. 날짜별 완료 checkpoint가 있어 같은 날 ECS 재시도는 이
 작업을 반복하지 않는다. shard 수는 `DART_INDUSTRY_SHARDS`로 조정할 수 있다.
+
+전체 재무 초기 적재는 기본 3개 worker가 전역 0.3초 호출 간격을 공유해 응답 대기만
+겹친다(`DART_FULL_STATEMENT_WORKERS`, 허용 범위 1~8). Bronze 수집은 정기 증분의
+Silver 인증 lock을 점유하지 않으며, 수집 완료 뒤 Silver publish 구간에서만 해당 lock을
+획득한다. 별도의 bootstrap lock이 초기 적재끼리의 중복 실행을 막는다. 활성 batch의
+scope와 `COLLECTING`/`COLLECTED`/`CERTIFIED` 상태는 S3 checkpoint에 기록하므로,
+수집 뒤 lock 충돌이나 task 중단이 발생해도 다음 실행이 같은 batch를 먼저 재개한다.
+lock은 기본 60초 간격으로 최대 5시간 기다리며
+`DART_BOOTSTRAP_LOCK_RETRY_SECONDS`와 `DART_BOOTSTRAP_LOCK_WAIT_SECONDS`로 조정한다.
 
 원자재 28종 전체 백필은 GitHub Actions의
 [`commodity-backfill.yml`](.github/workflows/commodity-backfill.yml)을 수동 실행할

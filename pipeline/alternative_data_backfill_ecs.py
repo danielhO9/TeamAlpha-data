@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import time
 
 import boto3
 
@@ -19,8 +20,74 @@ from pipeline.bronze import (
     dart_full_statements,
     dart_ownership,
 )
+from pipeline.common import db
 from pipeline.silver import alternative_data
 from pipeline.silver_quality import migrate
+
+
+BOOTSTRAP_COLLECTION_LOCK_KEY = 5_248_954_287_015_003
+
+
+def _acquire_bootstrap_collection_lock():
+    """Serialize bootstrap collectors without blocking the daily writer."""
+    connection = db.connect()
+    try:
+        connection.autocommit = True
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT pg_try_advisory_lock(%s)",
+                (BOOTSTRAP_COLLECTION_LOCK_KEY,),
+            )
+            row = cur.fetchone()
+        if not row or row[0] is not True:
+            raise RuntimeError("another full-statement bootstrap task is active")
+        print("[alternative-full-bootstrap] collection lock acquired", flush=True)
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
+def _release_bootstrap_collection_lock(connection) -> None:
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_unlock(%s)",
+                (BOOTSTRAP_COLLECTION_LOCK_KEY,),
+            )
+            row = cur.fetchone()
+        if not row or row[0] is not True:
+            raise RuntimeError("full-statement bootstrap lock was not held")
+        print("[alternative-full-bootstrap] collection lock released", flush=True)
+    finally:
+        connection.close()
+
+
+def _acquire_with_retry(acquire, label: str):
+    """Wait for a bounded maintenance window instead of dropping a batch."""
+    wait_seconds = int(os.environ.get("DART_BOOTSTRAP_LOCK_WAIT_SECONDS", "18000"))
+    retry_seconds = int(os.environ.get("DART_BOOTSTRAP_LOCK_RETRY_SECONDS", "60"))
+    if wait_seconds < 0 or retry_seconds < 1:
+        raise ValueError("invalid DART bootstrap lock retry configuration")
+    deadline = time.monotonic() + wait_seconds
+    attempt = 0
+    while True:
+        try:
+            return acquire()
+        except RuntimeError as exc:
+            attempt += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"timed out waiting for {label} after {wait_seconds}s"
+                ) from exc
+            if attempt == 1 or attempt % 10 == 0:
+                print(
+                    f"[alternative-full-bootstrap] waiting for {label} "
+                    f"attempt={attempt} remaining_seconds={int(remaining)}",
+                    flush=True,
+                )
+            time.sleep(min(retry_seconds, remaining))
 
 
 def _list_response_uris(bucket: str, prefix: str) -> list[str]:
@@ -142,9 +209,11 @@ def publish_full_statement_batch(
     max_scopes: int,
 ) -> dict:
     """Collect and certify one bounded, recent-first initial-load batch."""
-    lock = dart_silver_backfill_ecs.acquire_daily_certification_lock()
+    collection_lock = _acquire_with_retry(
+        _acquire_bootstrap_collection_lock,
+        "bootstrap collection lock",
+    )
     try:
-        migrate.assert_current(lock)
         files, remaining = dart_full_statements.run_bootstrap_batch(
             from_year,
             to_year,
@@ -153,11 +222,22 @@ def publish_full_statement_batch(
         )
         published = {}
         if files:
-            summary = alternative_data.publish_files(
-                full_statement_files=files,
-                conn=lock,
+            certification_lock = _acquire_with_retry(
+                dart_silver_backfill_ecs.acquire_daily_certification_lock,
+                "daily certification lock",
             )
-            published = summary["published"]
+            try:
+                migrate.assert_current(certification_lock)
+                summary = alternative_data.publish_files(
+                    full_statement_files=files,
+                    conn=certification_lock,
+                )
+                published = summary["published"]
+            finally:
+                dart_silver_backfill_ecs.release_daily_certification_lock(
+                    certification_lock,
+                )
+            dart_full_statements.mark_bootstrap_batch_certified("s3", files)
         result = {
             "selected_scopes": len(files),
             "remaining_scopes": remaining,
@@ -170,7 +250,7 @@ def publish_full_statement_batch(
         )
         return result
     finally:
-        dart_silver_backfill_ecs.release_daily_certification_lock(lock)
+        _release_bootstrap_collection_lock(collection_lock)
 
 
 def parse_args() -> argparse.Namespace:
