@@ -274,6 +274,13 @@ def test_full_statement_requests_overlap_with_bounded_workers(
 
     assert len(responses) == 3
     assert len(thread_ids) == 3
+    for ticker, year, report, fs_type in scopes:
+        pointer = (
+            tmp_path / "financials" / "dart_statement_lines"
+            / f"year={year}" / f"corp={ticker}" / f"report={report}"
+            / f"fs_type={fs_type}" / "latest.json"
+        )
+        assert pointer.exists()
 
 
 def test_ownership_snapshot_fetches_every_page(monkeypatch):

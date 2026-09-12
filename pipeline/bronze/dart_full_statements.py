@@ -484,6 +484,7 @@ def _collect_scopes(
         index, scope, previous = item
         ticker, year, report_code, fs_type = scope
         root = _scope_root(base, ticker, year, report_code, fs_type)
+        pointer_uri = f"{root}/latest.json"
         corp_code = corp_by_stock.get(ticker)
         if corp_code is None:
             raise RuntimeError(f"DART corp code missing for ticker={ticker}")
