@@ -9,7 +9,7 @@
 - 수급: 개인·기관·외국인의 매수/매도/순매수 수량 및 금액. 금액은 백만원에서 원으로 변환.
 - 시장: KRX(J), 2025-03-04 이후 NXT(NX), 통합(UN). UN 응답과 J+NX를 대조한다.
 - NXT는 manifest의 nxt_intervals에 종목별·날짜별 적격 여부와 evidence를 지정한다. ELIGIBLE 기간만 NX/UN을 조회한다. INELIGIBLE 기간에는 NX를 호출하지 않으며 통합 수급은 KRX 원본으로 구성하고 _derivation 및 _market_evidence를 기록한다. 이력이 없거나 중첩되면 API 호출 전 중단한다. 미제공 응답을 비대상 또는 0으로 간주하지 않는다.
-- 공매도: J 요청만 수집. 비율의 분모는 일별 차트 API의 FID_ORG_ADJ_PRC=1 원거래량. 제공 비율·거래량도 별도 보존한다. 시장 범위 근거가 확인된 정책 구간만 비율을 계산하고 나머지는 NULL/MARKET_SCOPE_UNVERIFIED로 저장한다.
+- 공매도: 운영 수집은 J 요청의 KRX 자료를 사용한다. 비율의 분모는 일별 차트 API의 FID_ORG_ADJ_PRC=1 원거래량. 제공 비율·거래량도 별도 보존한다. short_market, volume_market, volume_adjustment, market_scope_evidence를 payload에 기록한다. 시장 범위 근거가 확인된 정책 구간만 비율을 계산하고 나머지는 NULL/MARKET_SCOPE_UNVERIFIED로 저장한다.
 
 ## 보관과 연구 사용
 
@@ -28,7 +28,7 @@ trade_date, 실제 first_observed_at, 정책상 research_available_at을 분리�
 python -m pipeline.kis_flows export-universe --monthly-csv /path/monthly.csv --dest /path/universe.json
 ```
 
-3. 아래 예시 정책을 저장한다. 확인되지 않은 시장 범위를 KRX로 임의 변경하지 않는다. KRX로 설정할 경우 short_market_evidence와 short_market_verified_through가 필수다.
+3. 아래 예시 정책을 저장한다. 확인되지 않은 시장 범위를 KRX로 임의 변경하지 않는다. KRX로 설정할 경우 short_market_evidence, short_market_verified_from, short_market_verified_through가 필수다. 검증 기간은 양 끝 날짜를 포함하며 기간 밖은 비율을 NULL로 유지한다.
 
 ```json
 {"version":"kis-assumed-next-day-0830-v1","availability_lag_calendar_days":1,"availability_hour_kst":8,"availability_minute_kst":30,"short_market":"UNKNOWN"}
@@ -97,3 +97,17 @@ migration 016의 `asset_listing_snapshot`에 공식 원본·RDS 감사 결과의
 `pipeline.silver.asset_lifecycle.validate`는 전체 종목 합집합, 해시, 구간 중복과 요청 기간을 검사한다. 수집기의 `expected_partitions`는 선택한 RDS 스냅샷과 거래일 달력으로 날짜를 생성한 뒤 가격·인증·식별자를 검사한다. 스냅샷 검증 종료일 뒤의 날짜를 묵시적으로 허용하지 않는다. 갱신 시에는 새로운 공식 자료와 RDS 감사를 거쳐 스냅샷을 발행하고 manifest의 listing_snapshot_id 및 해시를 함께 변경한다.
 
 운영에는 015·016 migration 및 상장 이력 스냅샷을 적용했다. KIS 전체 백필과 일일 활성화는 아직 수행하지 않았다. PR 병합은 자동 배포를 유발하므로, 새 이미지 배포 후 짧은 기간의 KIS 실제 수집·RDS 적재 검증을 먼저 수행한다. NXT 이력은 현재 2026-09-10까지, 상장 구간은 2026-09-11까지 확인되어 있으므로 그 이후 수집 전 각각 최신화해야 한다.
+
+## 공매도 거래소 범위 검증 (2026-09-12)
+
+한투 일별 차트 [공식 명세](https://apiportal.koreainvestment.com/apiservice-apiservice?/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice)는 J=KRX, NX=NXT, UN=통합과 FID_ORG_ADJ_PRC=1=원주가를 명시한다. 공매도 [공식 명세](https://apiportal.koreainvestment.com/apiservice-apiservice?/uapi/domestic-stock/v1/quotations/daily-short-sale)는 J만 설명하지만 실제 조회에서는 NX/UN도 서로 다른 수량을 반환했다. 이 추가 응답은 시장 범위 대조에 사용하며 운영 NX/UN 공매도 수집을 활성화하지 않는다.
+
+실제 검증은 8종목·98개 종목-거래일, 한투 132회·KRX 30회 조회로 수행했다. 공매도 수량과 금액은 각각 98/98 일치했고, 세 시장 응답이 모두 있는 44개 종목-거래일에서는 J+NX=UN 수량·금액·거래량 검사가 모두 통과했다. 미제공 NX 행은 0으로 채우지 않고 합산 검증에서 제외했다. 출범 전, 출범 첫 주, 2025년 3월 말, 2026년 9월 표본을 포함한다.
+
+2026-09-10 삼성전자 공매도 수량은 J 692,808주 + NX 787주 = UN 693,595주이며 UN 수량·금액은 KRX 공개 합산 원본과 일치했다. KRX J 원거래량 22,517,075주를 분모로 사용한 KRX 비율은 3.076811708…%다. UN 거래량 31,539,807주를 J 공매도 수량에 붙이지 않는다.
+
+[KRX 공개 공매도 화면](https://data.krx.co.kr/comm/srt/srtLoader/index.cmd?screenId=MDCSTAT301)은 2025-03-04 이후 KRX+NXT 합산이다. 따라서 KRX 웹 합산 비율과 한투 J 비율이 다르다는 것만으로 오류라고 판단하지 않는다. 또 그 화면의 삼성전자 합산 분모 27,278,081주는 한투 UN 차트 분모와 다르다. 통합 비율까지 동일 정의라고 인증하지 않으며, 그 분모 차이의 원인은 이 검증에서 확정하지 않았다.
+
+운영 정책의 KRX 범위 승인은 공식 거래소 코드 정의와 실제 J+NX=UN 대조, KRX 원본 수량·금액 대조에 근거한 경험적 검증이다. 공급자가 공매도 NX/UN 지원을 문서로 보장했다는 의미나 전체 종목·전기간 값의 완전성을 보장한다는 의미는 아니다. 원본·해시·대조 결과는 정책의 short_market_evidence가 가리키는 불변 S3 검증 자료에 보관한다. 전체 이력 수집 후 날짜별 결측·값 검사를 별도로 수행한다.
+
+검증된 정책 파일은 [policy-krx-short-v1.json](../deploy/kis/policy-krx-short-v1.json)이다. 기존 UNKNOWN 정책을 계속 사용하면 비율은 계속 NULL이므로, 배포 후 KIS_POLICY_URI를 이 파일과 동일한 불변 S3 객체로 지정해야 한다. 이 파일 추가만으로 운영 일정이 변경되지는 않는다.

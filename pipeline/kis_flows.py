@@ -156,7 +156,10 @@ def checked_policy(policy):
     if policy['short_market']=='KRX' and not policy.get('short_market_evidence'):
         raise ValueError('short market scope requires evidence reference')
     if policy['short_market']=='KRX':
-        date.fromisoformat(policy['short_market_verified_through'])
+        first=date.fromisoformat(policy['short_market_verified_from'])
+        last=date.fromisoformat(policy['short_market_verified_through'])
+        if first>last:
+            raise ValueError('reversed short market verification interval')
     for exclusion in policy.get('calendar_exclusions',[]):
         date.fromisoformat(exclusion['date'])
         if not exclusion.get('evidence'):
@@ -179,9 +182,14 @@ def collect_partition(client, aid, ticker, dates, venue, policy):
         volume,vr=client.history('volume',ticker,'J',start,end)
         if set(dates)-set(short) or set(dates)-set(volume):
             raise ValueError('missing short-sale or original-volume dates')
+        first=date.fromisoformat(policy.get('short_market_verified_from','9999-12-31'))
         through=date.fromisoformat(policy.get('short_market_verified_through','0001-01-01'))
         for day in dates:
-            values=silver.short_sale(short[day],volume[day],same_market=policy['short_market']=='KRX' and day<=through)
+            verified=policy['short_market']=='KRX' and first<=day<=through
+            values=silver.short_sale(short[day],volume[day],same_market=verified)
+            values.update(short_market='KRX' if verified else 'UNKNOWN',
+                          volume_market='KRX', volume_adjustment='UNADJUSTED',
+                          market_scope_evidence=policy.get('short_market_evidence') if verified else None)
             output.append(silver.observation(aid,ticker,day,'J','short',values,sr+vr,policy))
     return output
 
