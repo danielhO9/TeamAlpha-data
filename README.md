@@ -216,6 +216,11 @@ investor_flows/krx/
     source.csv
     manifest.json  # 구매·활용승인 ID 및 SHA-256
 
+market_flows/kis/
+  dataset=<investor-flow|short-sale>/ticker=<종목코드>/sha256=<응답해시>/
+    response.json  # KIS REST 응답 byte-for-byte
+    manifest.json  # endpoint·요청범위·취득시각·행수·기간·단위, secret 제외
+
 short_balances/krx/
   sha256=<원문해시>/
     source.csv
@@ -613,6 +618,12 @@ uv run python -m pipeline.bronze.krx_investor_flows \
   --source-file ./authorized.csv --authorization-id <계약식별자> --dest s3
 uv run python -m pipeline.bronze.krx_short_balances \
   --source-file ./authorized-short.csv --authorization-id <계약식별자> --dest s3
+# 본인 KIS Open API 계정의 기본 제공 API로 실제 종목별 수급/공매도 거래흐름 수집.
+# 투자자 수급 금액 단위는 백만원, 공매도 금액 단위는 원이다.
+uv run python -m pipeline.bronze.kis_market_flows \
+  --dataset investor-flow --tickers 005930 --as-of 20250812 --dest local
+uv run python -m pipeline.bronze.kis_market_flows \
+  --dataset short-sale --tickers 005930 --from 20240301 --to 20240328 --dest local
 # 운영 S3 기업행사 직접 publication은 금지됩니다. pipeline.daily_full의
 # fail-closed invalidation -> recertification 경로만 사용합니다.
 uv run python -m pipeline.bronze.dividends --from 2015 --to 2026 --dest s3 --reports annual
@@ -646,6 +657,41 @@ uv run python -m pipeline.alternative_data_backfill_ecs \
 
 OpenDART 수집은 content-addressed pointer로 재개된다. 투자자수급·공매도 수집기는
 KRX 웹페이지를 스크레이핑하지 않으며 승인 원본과 취득근거가 없으면 fail-closed한다.
+KIS 경로는 한국투자증권 공식 API 응답을 `KIS_SECURITIES_OPEN_API` 출처로 보존하며
+KRX 직접 수집이나 공매도 잔고로 표시하지 않는다. KIS 공식 FAQ상 기본서비스 유량은
+0원이고 기본서비스 과금 계획은 없지만, 본인 계좌의 Open API 신청과
+`KIS_APP_KEY`/`KIS_APP_SECRET` 발급은 필요하다. 무료 API가 전종목 전기간 이력을
+보장한다는 뜻은 아니므로, 실제 키로 표본 호출해 측정한 응답 기간까지만 coverage로
+인증한다. 현재 KIS 수집기는 먼저 Bronze 원문과 실측 coverage를 고정하며, 응답 형태와
+기간을 실제 검증하기 전에는 Silver 백필 완료로 간주하지 않는다.
+
+공매도 **체결** 비율의 로컬 정제는 다음 명령으로 실행한다. DB 적재나
+정기 배치 연결은 하지 않으며, 기존 원문과 공급자 비율은 그대로 보존한다.
+
+```bash
+python -m pipeline.silver.short_sales \
+  --short-sales kis_short_sales.csv \
+  --raw-volumes verified_raw_volumes.csv \
+  --output short_sales_prepared.parquet
+```
+
+- 수량 입력: 문자열 `ticker`, `trade_date`(YYYYMMDD 또는 YYYY-MM-DD),
+  `ssts_cntg_qty`. 선택적으로 `short_qty_verified=true`와
+  `short_qty_evidence`를 제공한다. 기타 원본 열도 보존한다.
+- 분모 입력: `ticker`, `trade_date`, `raw_total_volume`,
+  `volume_basis=UNADJUSTED_SHARES`, `raw_volume_verified=true`,
+  `volume_evidence`(검증 근거 경로/참조). 검증 표시는 호출자가 확보한 근거를
+  전달하는 계약이며 이 변환기가 원천 데이터를 자동 인증하는 것은 아니다.
+- 종목·날짜를 정확히 연결해 `short_sale_ratio_pct = 100 * ssts_cntg_qty /
+  raw_total_volume`로 계산한다. KIS `acml_vol`(조정 기준),
+  `ssts_vol_rlim`(공급자 비율), `stnd_vol_smtn`(요청 구간 누계)은 사용하지 않는다.
+- 분모 결측/0/미검증 또는 수량이 분모를 초과하면 비율은 결측이며
+  `ratio_status`에 사유를 기록한다. 종목·날짜 중복은 관측 vintage를 먼저
+  선택하도록 오류로 차단한다. 최근 날짜 값으로 채우지 않는다.
+- `ratio_status=COMPUTED`는 계산 성공일 뿐이다. 수량 검증 근거까지 있어야
+  `ratio_value_verified=true`이며, 이 표시도 과거 공개시점/PIT 사용이나
+  종목 전기간의 무결성을 인증하지 않는다.
+
 현재 DART 업종과 오늘 받은 과거 공매도 파일은 최초 관측시각 이전으로 소급하지 않는다.
 초기 적재가 끝난 뒤 정기 `pipeline.daily_full`은 정기보고서가 접수된 회사의 전체
 재무제표 scope, 지분공시가 접수된 회사의 해당 ownership endpoint, 아직 publication
@@ -964,3 +1010,6 @@ git status --short
 uv run python -m compileall -q pipeline
 uv run pytest -q
 ```
+
+KIS 역사적 수급·공매도의 S3/RDS 적재 및 일일 자동화 운영 순서는
+[운영 문서](docs/kis-market-flows.md)를 참고한다. 기본 비활성이며, 병합 전 migration 015 적용이 필요하다.
