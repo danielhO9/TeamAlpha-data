@@ -18,7 +18,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -31,6 +31,8 @@ from pipeline.common.sink import exists, read_bytes, write_bytes, write_text_if_
 ENDPOINT = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
 BOOTSTRAP_STATE_KEY = "quality/checkpoints/dart-full-bootstrap-v1.json"
 BOOTSTRAP_STATE_SCHEMA = "dart-full-bootstrap-state-v1"
+BOOTSTRAP_SCOPE_CACHE_KEY = "quality/checkpoints/dart-full-bootstrap-scopes-v1.json"
+BOOTSTRAP_SCOPE_CACHE_SCHEMA = "dart-full-bootstrap-scopes-v1"
 _MAJOR_KEY_RE = re.compile(
     r"financials/dart/year=(?P<year>\d{4})/corp=(?P<ticker>[0-9A-Z]{6})/"
     r"(?P<report>11011|11012|11013|11014)\.json$"
@@ -547,14 +549,6 @@ def _collect_scopes(
     else:
         executor.shutdown(wait=True)
 
-    if completed and completed < 100:
-        if completed == len(scopes):
-            print(
-                f"[dart-full-statements] {completed}/{len(scopes)} "
-                f"fetched={fetched} skipped={skipped} "
-                f"reused_legacy={reused_legacy}",
-                flush=True,
-            )
     return sorted(set(responses))
 
 
@@ -626,6 +620,54 @@ def _bootstrap_state_uri(base: str) -> str:
     return f"{base}/{BOOTSTRAP_STATE_KEY}"
 
 
+def _bootstrap_scope_cache_uri(base: str) -> str:
+    return f"{base}/{BOOTSTRAP_SCOPE_CACHE_KEY}"
+
+
+def _read_bootstrap_scope_cache(
+    base: str, from_year: int, to_year: int,
+) -> list[tuple[str, int, str, str]] | None:
+    raw = read_bytes(_bootstrap_scope_cache_uri(base))
+    if raw is None:
+        return None
+    cache = json.loads(raw.decode("utf-8"))
+    if (
+        cache.get("schema_version") != BOOTSTRAP_SCOPE_CACHE_SCHEMA
+        or cache.get("from_year") != from_year
+        or cache.get("to_year") != to_year
+    ):
+        return None
+    generated_at = datetime.fromisoformat(str(cache.get("generated_at") or ""))
+    if generated_at.tzinfo is None:
+        raise RuntimeError("DART full-statement scope cache timestamp lacks timezone")
+    ttl_hours = int(os.environ.get("DART_BOOTSTRAP_SCOPE_CACHE_HOURS", "168"))
+    if ttl_hours < 1:
+        raise ValueError("DART_BOOTSTRAP_SCOPE_CACHE_HOURS must be positive")
+    if datetime.now(timezone.utc) - generated_at > timedelta(hours=ttl_hours):
+        return None
+    scopes = cache.get("scopes")
+    if not isinstance(scopes, list) or any(
+        not isinstance(scope, list) or len(scope) != 4 for scope in scopes
+    ):
+        raise RuntimeError("invalid DART full-statement scope cache")
+    return [tuple(scope) for scope in scopes]
+
+
+def _write_bootstrap_scope_cache(
+    base: str,
+    from_year: int,
+    to_year: int,
+    scopes: list[tuple[str, int, str, str]],
+) -> None:
+    _write_bootstrap_state(base, {
+        "schema_version": BOOTSTRAP_SCOPE_CACHE_SCHEMA,
+        "from_year": from_year,
+        "to_year": to_year,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scopes": [list(scope) for scope in scopes],
+    }, uri=_bootstrap_scope_cache_uri(base))
+
+
 def _read_bootstrap_state(base: str) -> dict | None:
     raw = read_bytes(_bootstrap_state_uri(base))
     if raw is None:
@@ -643,10 +685,12 @@ def _read_bootstrap_state(base: str) -> dict | None:
     return state
 
 
-def _write_bootstrap_state(base: str, state: dict) -> None:
+def _write_bootstrap_state(
+    base: str, state: dict, *, uri: str | None = None,
+) -> None:
     write_text_if_changed(
         json.dumps(state, ensure_ascii=False, sort_keys=True),
-        _bootstrap_state_uri(base),
+        uri or _bootstrap_state_uri(base),
     )
 
 
@@ -695,15 +739,43 @@ def run_bootstrap_batch(
         )
         known_objects = _s3_inventory(base)
     else:
-        scopes = sorted(
-            discover_scopes(base, from_year, to_year),
-            key=lambda value: (-value[1], value[0], value[2], value[3]),
-        )
+        scopes = _read_bootstrap_scope_cache(base, from_year, to_year)
+        cache_hit = scopes is not None
+        if scopes is None:
+            scopes = sorted(
+                discover_scopes(base, from_year, to_year),
+                key=lambda value: (-value[1], value[0], value[2], value[3]),
+            )
+            _write_bootstrap_scope_cache(base, from_year, to_year, scopes)
+            print(
+                f"[dart-full-bootstrap] scope cache refreshed scopes={len(scopes)}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[dart-full-bootstrap] scope cache hit scopes={len(scopes)}",
+                flush=True,
+            )
         known_objects = _s3_inventory(base)
         pending = [
             scope for scope in scopes
             if f"{_scope_root(base, *scope)}/latest.json" not in known_objects
         ]
+        if not pending and cache_hit:
+            scopes = sorted(
+                discover_scopes(base, from_year, to_year),
+                key=lambda value: (-value[1], value[0], value[2], value[3]),
+            )
+            _write_bootstrap_scope_cache(base, from_year, to_year, scopes)
+            pending = [
+                scope for scope in scopes
+                if f"{_scope_root(base, *scope)}/latest.json" not in known_objects
+            ]
+            print(
+                "[dart-full-bootstrap] final scope cache revalidation "
+                f"scopes={len(scopes)} pending={len(pending)}",
+                flush=True,
+            )
         selected = pending[:max_scopes]
         remaining = max(0, len(pending) - len(selected))
         print(

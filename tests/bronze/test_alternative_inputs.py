@@ -204,6 +204,44 @@ def test_full_statement_bootstrap_resumes_unpublished_batch(
     assert json.loads(state_path.read_text())["status"] == "COLLECTED"
 
 
+def test_full_statement_bootstrap_reuses_scope_cache(monkeypatch, tmp_path: Path):
+    scopes = [
+        ["005930", 2026, "11012", "CFS"],
+        ["000660", 2025, "11011", "OFS"],
+    ]
+    cache_path = tmp_path / dart_full_statements.BOOTSTRAP_SCOPE_CACHE_KEY
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(json.dumps({
+        "schema_version": dart_full_statements.BOOTSTRAP_SCOPE_CACHE_SCHEMA,
+        "from_year": 2015,
+        "to_year": 2026,
+        "generated_at": "2099-01-01T00:00:00+00:00",
+        "scopes": scopes,
+    }))
+    monkeypatch.setattr(
+        dart_full_statements, "base_uri", lambda _dest: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        dart_full_statements, "discover_scopes",
+        lambda *_args: pytest.fail("fresh scope cache must avoid discovery"),
+    )
+    monkeypatch.setattr(dart_full_statements, "_s3_inventory", lambda _base: set())
+    captured = {}
+
+    def collect(_base, selected, **_kwargs):
+        captured["scopes"] = selected
+        return ["one.json", "two.json"]
+
+    monkeypatch.setattr(dart_full_statements, "_collect_scopes", collect)
+    files, remaining = dart_full_statements.run_bootstrap_batch(
+        2015, 2026, "local", max_scopes=9000,
+    )
+
+    assert captured["scopes"] == [tuple(scope) for scope in scopes]
+    assert files == ["one.json", "two.json"]
+    assert remaining == 0
+
+
 def test_full_statement_requests_overlap_with_bounded_workers(
     monkeypatch, tmp_path: Path,
 ):

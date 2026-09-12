@@ -706,6 +706,8 @@ Silver 인증 lock을 점유하지 않으며, 수집 완료 뒤 Silver publish �
 획득한다. 별도의 bootstrap lock이 초기 적재끼리의 중복 실행을 막는다. 활성 batch의
 scope와 `COLLECTING`/`COLLECTED`/`CERTIFIED` 상태는 S3 checkpoint에 기록하므로,
 수집 뒤 lock 충돌이나 task 중단이 발생해도 다음 실행이 같은 batch를 먼저 재개한다.
+전체 scope 탐색 결과는 기본 168시간 캐시하되 pending이 0이 되면 원본 목록을 다시
+읽어 누락 scope가 없는지 최종 확인한다(`DART_BOOTSTRAP_SCOPE_CACHE_HOURS`).
 lock은 기본 60초 간격으로 최대 5시간 기다리며
 `DART_BOOTSTRAP_LOCK_RETRY_SECONDS`와 `DART_BOOTSTRAP_LOCK_WAIT_SECONDS`로 조정한다.
 
