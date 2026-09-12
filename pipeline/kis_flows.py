@@ -14,6 +14,8 @@ from pipeline.bronze.kis_history import Client, digest
 from pipeline.common import db
 from pipeline.common.sink import read_bytes, write_text
 from pipeline.silver import kis_flows as silver
+from pipeline.silver import asset_lifecycle
+from psycopg.types.json import Jsonb
 from pipeline.silver_quality import migrate, repository
 from pipeline.silver_quality.models import CheckResult,CheckStatus,Severity
 
@@ -69,11 +71,26 @@ def expected_partitions(conn, manifest, start, end, calendar_exclusions=()):
             assets = cur.fetchall()
             if {r[0] for r in assets} != set(ids):
                 raise ValueError('universe contains unknown RDS assets')
-            if any(r[1] is None for r in assets):
-                raise ValueError('listing start missing; cannot certify expected coverage')
-            if any(r[2] is not None and r[2] < r[1] for r in assets):
-                raise ValueError('invalid listing interval')
-            cur.execute('''SELECT a.asset_id,i.identifier,d.day,p.trade_date,q.status
+            if manifest.get('listing_snapshot_id'):
+                periods = asset_lifecycle.load(cur, manifest['listing_snapshot_id'], ids, start, end)
+                cur.execute('''SELECT l.asset_id,i.identifier,d.day,p.trade_date,q.status
+                    FROM jsonb_to_recordset(%s::jsonb)
+                      AS l(asset_id bigint,ticker text,start date,"end" date)
+                    CROSS JOIN unnest(%s::date[]) AS d(day)
+                    LEFT JOIN price_daily p ON p.asset_id=l.asset_id AND p.source='KRX'
+                      AND p.trade_date=d.day AND p.market IN ('KOSPI','KOSDAQ')
+                    LEFT JOIN dq_run q ON q.run_id=p.quality_run_id
+                    LEFT JOIN asset_identifier i ON i.asset_id=l.asset_id
+                      AND i.source='KRX' AND i.identifier_type='ticker' AND i.identifier=l.ticker
+                      AND i.valid_from<=d.day AND (i.valid_to IS NULL OR i.valid_to>=d.day)
+                    WHERE d.day>=l.start AND (l."end" IS NULL OR d.day<=l."end")
+                    ORDER BY l.asset_id,d.day''', (Jsonb(periods), sessions))
+            else:
+                if any(r[1] is None for r in assets):
+                    raise ValueError('listing start missing; cannot certify expected coverage')
+                if any(r[2] is not None and r[2] < r[1] for r in assets):
+                    raise ValueError('invalid listing interval')
+                cur.execute('''SELECT a.asset_id,i.identifier,d.day,p.trade_date,q.status
                 FROM asset a CROSS JOIN unnest(%s::date[]) AS d(day)
                 LEFT JOIN price_daily p ON p.asset_id=a.asset_id AND p.source='KRX'
                   AND p.trade_date=d.day AND p.market IN ('KOSPI','KOSDAQ')
