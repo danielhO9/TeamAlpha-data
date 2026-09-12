@@ -121,3 +121,44 @@ def test_missing_partition_dates_rejects_instead_of_zero_fill():
         def history(self,*args): return {},[]
     with pytest.raises(ValueError,match='no zero fill'):
         collect_partition(Empty(),1,'005930',[date(2025,3,4)],'NX',{})
+
+
+def test_short_scope_policy_requires_ordered_verification_interval():
+    base={'version':'scope-v1','availability_lag_calendar_days':1,
+          'availability_hour_kst':8,'short_market':'KRX',
+          'short_market_evidence':'s3://evidence/market-scope.json',
+          'short_market_verified_from':'2015-01-01',
+          'short_market_verified_through':'2026-09-10'}
+    assert checked_policy(base)==base
+    with pytest.raises(ValueError,match='reversed'):
+        checked_policy({**base,'short_market_verified_from':'2026-09-11'})
+    with pytest.raises(KeyError,match='verified_from'):
+        checked_policy({k:v for k,v in base.items() if k!='short_market_verified_from'})
+
+
+def test_short_market_bounds_and_provenance_use_krx_volume():
+    from pipeline.kis_flows import collect_partition
+    days=[date(2026,9,d) for d in (8,9,10,11)]
+    receipt={'fetched_at':'2026-09-12T00:00:00+00:00','raw_uri':'s3://test/raw'}
+    class Source:
+        def history(self,kind,ticker,venue,start,end):
+            assert venue=='J'  # Never substitute the larger integrated denominator.
+            data=flow() if kind=='investor' else ({'ssts_cntg_qty':'692808',
+                'ssts_tr_pbmn':'184051995500','acml_vol':'22517075'}
+                if kind=='short' else {'acml_vol':'22517075'})
+            return {d:data for d in days},[receipt]
+    policy={'version':'scope-v1','availability_lag_calendar_days':1,
+            'availability_hour_kst':8,'short_market':'KRX',
+            'short_market_verified_from':'2026-09-09',
+            'short_market_verified_through':'2026-09-10',
+            'short_market_evidence':'s3://evidence/market-scope.json'}
+    rows=collect_partition(Source(),2325,'005930',days,'J',policy)
+    short=[r['values'] for r in rows if r['kind']=='short']
+    assert [r['ratio_status'] for r in short]==[
+        'MARKET_SCOPE_UNVERIFIED','VALID','VALID','MARKET_SCOPE_UNVERIFIED']
+    assert short[1]['short_market']=='KRX'
+    assert short[1]['volume_market']=='KRX'
+    assert short[1]['volume_adjustment']=='UNADJUSTED'
+    assert short[1]['market_scope_evidence']==policy['short_market_evidence']
+    assert Decimal(short[1]['short_ratio_pct']).quantize(Decimal('.000001'))==Decimal('3.076812')
+    assert short[0]['short_market']=='UNKNOWN' and short[0]['market_scope_evidence'] is None

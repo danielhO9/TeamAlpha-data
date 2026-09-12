@@ -1,0 +1,20 @@
+{
+  "availability_hour_kst": 8,
+  "availability_lag_calendar_days": 1,
+  "availability_minute_kst": 30,
+  "calendar_exclusions": [
+    {
+      "date": "2026-06-03",
+      "evidence": "https://www.ssfutures.com/ssf/customer/notice/CUS_01102.cmd?ND_PATH=%2Fbiz%2Fcustomer%2Fnotice%2FAd202_4589.shtm&categoryID=M158746897264671332"
+    },
+    {
+      "date": "2026-07-17",
+      "evidence": "https://www.ssfutures.com/ssf/customer/notice/CUS_01102.cmd?ND_PATH=%2Fbiz%2Fcustomer%2Fnotice%2FAd202_4589.shtm&categoryID=M158746897264671332"
+    }
+  ],
+  "short_market": "KRX",
+  "short_market_evidence": "s3://soma-quant-bronze-31-159372032315-ap-northeast-2-an/verification/kis/market-scope/2026-09-12/212764ca413a2841228d5174a48e16ef91ea25a44b269ca2a613aae33f045fc1/certificate.json",
+  "short_market_verified_from": "2015-01-01",
+  "short_market_verified_through": "2026-09-10",
+  "version": "kis-krx-short-scope-v1"
+}
