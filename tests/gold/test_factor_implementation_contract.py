@@ -258,8 +258,7 @@ def test_runner_binds_exact_daily_range_and_commits(monkeypatch):
     assert params["factor_id"] == 42
     assert params["start_date"] == date(2026, 9, 1)
     assert params["end_date"] == date(2026, 9, 10)
-    conn.commit.assert_called_once_with()
-    conn.rollback.assert_not_called()
+    conn.transaction.assert_called_once_with(force_rollback=False)
 
 
 def test_runner_rejects_reversed_daily_range_before_db_work():
@@ -298,7 +297,7 @@ def test_daily_runner_only_executes_approved_manifest_versions(monkeypatch):
     assert {call["factor_key"] for call in calls} == set(results)
     assert all(call["start_date"] == date(2026, 9, 11) for call in calls)
     assert all(call["end_date"] == date(2026, 9, 11) for call in calls)
-    conn.rollback.assert_not_called()
+    conn.transaction.assert_called_once_with()
 
 
 def test_promote_daily_records_explicit_human_approval(monkeypatch):

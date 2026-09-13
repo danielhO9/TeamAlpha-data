@@ -177,65 +177,66 @@ def run_factor(
         raise ValueError(f"허용되지 않은 Gold 구현입니다: {factor_key}")
     spec = manifest[factor_key]
     sql_path = ROOT / spec["sql"]
-    metadata = _load_factor(conn, factor_key, int(spec["version"]))
-    validate_contract(metadata, spec, sql_path)
     try:
-        with conn.cursor() as cur:
-            params = {
-                "factor_id": metadata["factor_id"],
-                "start_date": start,
-                "end_date": end,
-            }
-            cur.execute(
-                build_stage_sql(sql_path.read_text(encoding="utf-8")),
-                params,
-            )
-            cur.execute(
-                """
-                SELECT count(*), count(DISTINCT (asset_id, as_of_date)),
-                       count(*) FILTER (
-                           WHERE as_of_date < %(start_date)s
-                              OR as_of_date > %(end_date)s
-                              OR value::text IN ('NaN', 'Infinity', '-Infinity')
-                              OR rank <= 0
-                       )
-                FROM _gold_factor_values
-                """,
-                params,
-            )
-            row_count, distinct_count, invalid_count = cur.fetchone()
-            if row_count != distinct_count or invalid_count:
-                raise ValueError(
-                    "Gold daily candidate quality failed: "
-                    f"rows={row_count}, distinct={distinct_count}, "
-                    f"invalid={invalid_count}"
+        # The daily certification session is deliberately autocommit while it
+        # performs network work. Keep staging, quality, and replacement in one
+        # explicit transaction so ON COMMIT DROP cannot fire between them.
+        with conn.transaction(force_rollback=not apply):
+            metadata = _load_factor(conn, factor_key, int(spec["version"]))
+            validate_contract(metadata, spec, sql_path)
+            with conn.cursor() as cur:
+                params = {
+                    "factor_id": metadata["factor_id"],
+                    "start_date": start,
+                    "end_date": end,
+                }
+                cur.execute(
+                    build_stage_sql(sql_path.read_text(encoding="utf-8")),
+                    params,
                 )
-            cur.execute(
-                """
-                DELETE FROM gold.factor_value
-                WHERE factor_id = %(factor_id)s
-                  AND as_of_date BETWEEN %(start_date)s AND %(end_date)s
-                """,
-                params,
-            )
-            cur.execute(
-                """
-                INSERT INTO gold.factor_value (
-                    factor_id, asset_id, as_of_date, value, rank
+                cur.execute(
+                    """
+                    SELECT count(*), count(DISTINCT (asset_id, as_of_date)),
+                           count(*) FILTER (
+                               WHERE as_of_date < %(start_date)s
+                                  OR as_of_date > %(end_date)s
+                                  OR value::text IN (
+                                      'NaN', 'Infinity', '-Infinity'
+                                  )
+                                  OR rank <= 0
+                           )
+                    FROM _gold_factor_values
+                    """,
+                    params,
                 )
-                SELECT %(factor_id)s, asset_id, as_of_date, value, rank
-                FROM _gold_factor_values
-                """,
-                params,
-            )
-            affected = max(cur.rowcount, 0)
-        if apply:
-            conn.commit()
-        else:
-            conn.rollback()
+                row_count, distinct_count, invalid_count = cur.fetchone()
+                if row_count != distinct_count or invalid_count:
+                    raise ValueError(
+                        "Gold daily candidate quality failed: "
+                        f"rows={row_count}, distinct={distinct_count}, "
+                        f"invalid={invalid_count}"
+                    )
+                cur.execute(
+                    """
+                    DELETE FROM gold.factor_value
+                    WHERE factor_id = %(factor_id)s
+                      AND as_of_date BETWEEN %(start_date)s AND %(end_date)s
+                    """,
+                    params,
+                )
+                cur.execute(
+                    """
+                    INSERT INTO gold.factor_value (
+                        factor_id, asset_id, as_of_date, value, rank
+                    )
+                    SELECT %(factor_id)s, asset_id, as_of_date, value, rank
+                    FROM _gold_factor_values
+                    """,
+                    params,
+                )
+                affected = max(cur.rowcount, 0)
         return affected
     except Exception:
-        conn.rollback()
         raise
 
 
@@ -254,23 +255,24 @@ def run_approved_daily(
     target = _parse_date(as_of_date)
     manifest = load_manifest()
     approved: list[str] = []
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT factor_key
-            FROM gold.factor
-            WHERE status = 'APPROVED'
-              AND (factor_key, version) IN (
-                  SELECT * FROM unnest(%s::text[], %s::integer[])
-              )
-            ORDER BY factor_key
-            """,
-            (
-                list(manifest),
-                [int(spec["version"]) for spec in manifest.values()],
-            ),
-        )
-        approved = [row[0] for row in cur.fetchall()]
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT factor_key
+                FROM gold.factor
+                WHERE status = 'APPROVED'
+                  AND (factor_key, version) IN (
+                      SELECT * FROM unnest(%s::text[], %s::integer[])
+                  )
+                ORDER BY factor_key
+                """,
+                (
+                    list(manifest),
+                    [int(spec["version"]) for spec in manifest.values()],
+                ),
+            )
+            approved = [row[0] for row in cur.fetchall()]
     results: dict[str, int] = {}
     for factor_key in approved:
         affected = run_factor(
