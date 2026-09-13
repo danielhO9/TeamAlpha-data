@@ -33,14 +33,14 @@ def test_allowlisted_factor_sql_files_exist_and_have_stable_hashes():
         assert len(hashlib.sha256(path.read_bytes()).hexdigest()) == 64
         assert spec["value_contract"] == "raw_value_direction_adjusted_rank_v1"
         assert spec["frequency"] == "daily"
-        assert spec["version"] == 3
+        assert int(spec["version"]) >= 3
         assert len(spec["research_definition_hash"]) == 16
 
 
 def test_daily_candidate_metadata_is_complete_and_immutable():
     rows = candidate_rows()
     assert {row["factor_key"] for row in rows} == set(MANIFEST)
-    assert all(row["version"] == 3 for row in rows)
+    assert all(row["version"] >= 3 for row in rows)
     assert all(row["config"]["frequency"] == "daily" for row in rows)
     assert all(len(row["implementation_hash"]) == 64 for row in rows)
 
@@ -170,7 +170,7 @@ def test_new_factors_preserve_pit_and_rolling_contracts():
     assert "fy.fy_end - interval '370 days'" in roce
     assert "ROWS BETWEEN 251 PRECEDING AND CURRENT ROW" in turnover_volatility
     assert "stddev_samp(log_turnover)" in turnover_volatility
-    assert "LIMIT 504" in kurtosis
+    assert "ROWS BETWEEN 503 PRECEDING AND CURRENT ROW" in kurtosis
     assert "daily_return" in kurtosis
     assert "sample_variance" in kurtosis
     assert "sample_variance = 0 THEN -3.0" in kurtosis

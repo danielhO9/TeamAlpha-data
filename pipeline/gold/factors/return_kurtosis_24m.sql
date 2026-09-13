@@ -40,9 +40,32 @@ WITH certified AS (
                 PARTITION BY asset_id ORDER BY trade_date
               ) - 1.0 AS daily_return
     FROM certified
-), targets AS (
-    SELECT *
+), rolling_moments AS (
+    SELECT
+        daily_returns.*,
+        count(*) OVER recent AS window_rows,
+        count(daily_return) OVER recent AS n,
+        sum(daily_return) OVER recent AS sum_1,
+        sum(power(daily_return, 2)) OVER recent AS sum_2,
+        sum(power(daily_return, 3)) OVER recent AS sum_3,
+        sum(power(daily_return, 4)) OVER recent AS sum_4,
+        var_samp(daily_return) OVER recent AS sample_variance
     FROM daily_returns
+    WINDOW recent AS (
+        PARTITION BY asset_id ORDER BY trade_date
+        ROWS BETWEEN 503 PRECEDING AND CURRENT ROW
+    )
+), moments AS (
+    SELECT
+        asset_id, trade_date AS as_of_date, trade_date AS signal_date,
+        window_rows, n, sample_variance,
+        (
+            sum_4
+            - 4.0 * (sum_1 / n) * sum_3
+            + 6.0 * power(sum_1 / n, 2) * sum_2
+            - 3.0 * n * power(sum_1 / n, 4)
+        ) AS fourth_sum
+    FROM rolling_moments
     WHERE trade_date BETWEEN %(start_date)s::date AND %(end_date)s::date
       AND instrument_type = 'common_stock'
       AND name !~* '(스팩|SPAC)'
@@ -50,36 +73,7 @@ WITH certified AS (
       AND age_days >= 504
       AND market_cap > 0
       AND adj_close > 0
-), moments AS (
-    SELECT
-        t.asset_id, t.trade_date AS as_of_date,
-        t.trade_date AS signal_date,
-        stats.window_rows, stats.n, stats.sample_variance,
-        stats.fourth_sum
-    FROM targets t
-    JOIN LATERAL (
-        SELECT
-            count(*) AS window_rows,
-            count(sample.daily_return) AS n,
-            max(sample.sample_variance) AS sample_variance,
-            sum(
-                power(sample.daily_return - sample.mean_return, 4)
-            ) AS fourth_sum
-        FROM (
-            SELECT
-                observations.daily_return,
-                avg(observations.daily_return) OVER () AS mean_return,
-                var_samp(observations.daily_return) OVER () AS sample_variance
-            FROM (
-                SELECT r.daily_return
-                FROM daily_returns r
-                WHERE r.asset_id = t.asset_id
-                  AND r.trade_date <= t.trade_date
-                ORDER BY r.trade_date DESC
-                LIMIT 504
-            ) observations
-        ) sample
-    ) stats ON true
+      AND n >= 378
 ), raw_values AS (
     SELECT
         asset_id, as_of_date, signal_date,
@@ -96,7 +90,6 @@ WITH certified AS (
         ) END AS value
     FROM moments
     WHERE window_rows = 504
-      AND n >= 378
       AND sample_variance >= 0
 ), ranked AS (
     SELECT
