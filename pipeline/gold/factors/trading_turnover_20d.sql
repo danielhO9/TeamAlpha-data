@@ -1,19 +1,13 @@
--- trading_turnover_20d Gold implementation.
+-- trading_turnover_20d daily Gold implementation.
 -- value = current row 포함 최근 20 KRX 거래행 평균 거래대금 / 시가총액
 -- predicted_sign = -1, 따라서 rank 1은 raw value가 가장 낮은 종목이다.
--- %(start_date)s와 %(end_date)s는 닫힌 KRX 거래일 범위다.
-WITH certified AS (
+-- Each target uses an indexed, bounded 250-row history probe. This proves
+-- listing age without rescanning the complete price table every day.
+WITH targets AS (
     SELECT
-        p.asset_id, a.name, a.instrument_type, p.trade_date,
-        p.adj_close, p.trading_value, p.market_cap, p.market,
-        avg(p.trading_value) OVER (
-            PARTITION BY p.asset_id ORDER BY p.trade_date
-            ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
-        ) AS adv20,
-        row_number() OVER (
-            PARTITION BY p.asset_id ORDER BY p.trade_date
-        ) AS age_days,
-        min(p.trade_date) OVER (PARTITION BY p.asset_id) AS first_seen
+        p.asset_id, a.name, a.instrument_type,
+        p.trade_date AS as_of_date, p.trade_date AS signal_date,
+        p.adj_close, p.market_cap
     FROM public.factor_price_feature_daily p
     JOIN public.asset a
       ON a.asset_id = p.asset_id
@@ -35,22 +29,58 @@ WITH certified AS (
     ) identifier ON true
     WHERE p.source = 'KRX'
       AND p.market IN ('KOSPI', 'KOSDAQ')
-      AND p.trade_date <= %(end_date)s::date
+      AND p.trade_date BETWEEN %(start_date)s::date AND %(end_date)s::date
+      AND a.instrument_type = 'common_stock'
+      AND a.name !~* '(스팩|SPAC)'
+      AND position('리츠' in a.name) = 0
+      AND p.market_cap > 0
+      AND p.adj_close > 0
 ), raw_values AS (
     SELECT
-        asset_id,
-        trade_date AS as_of_date,
-        adv20::double precision / market_cap::double precision AS value,
-        trade_date AS signal_date
-    FROM certified
-    WHERE trade_date BETWEEN %(start_date)s::date AND %(end_date)s::date
-      AND instrument_type = 'common_stock'
-      AND name !~* '(스팩|SPAC)'
-      AND position('리츠' in name) = 0
-      AND age_days >= 250
-      AND market_cap > 0
-      AND adj_close > 0
-      AND adv20 IS NOT NULL
+        t.asset_id, t.as_of_date, t.signal_date,
+        history.adv20::double precision
+            / t.market_cap::double precision AS value
+    FROM targets t
+    JOIN LATERAL (
+        SELECT
+            count(*) AS age_rows,
+            avg(trading_value) FILTER (
+                WHERE recent_rank <= 20
+            ) AS adv20
+        FROM (
+            SELECT
+                observations.trading_value,
+                row_number() OVER (
+                    ORDER BY observations.trade_date DESC
+                ) AS recent_rank
+            FROM (
+                SELECT p.trade_date, p.trading_value
+                FROM public.factor_price_feature_daily p
+                JOIN public.dq_run q
+                  ON q.run_id = p.quality_run_id
+                 AND q.status = 'CERTIFIED'
+                WHERE p.asset_id = t.asset_id
+                  AND p.source = 'KRX'
+                  AND p.market IN ('KOSPI', 'KOSDAQ')
+                  AND p.trade_date <= t.as_of_date
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.asset_identifier ai
+                      WHERE ai.asset_id = p.asset_id
+                        AND ai.source = 'KRX'
+                        AND ai.identifier_type = 'ticker'
+                        AND ai.valid_from <= p.trade_date
+                        AND (
+                            ai.valid_to IS NULL
+                            OR ai.valid_to >= p.trade_date
+                        )
+                  )
+                ORDER BY p.trade_date DESC
+                LIMIT 250
+            ) observations
+        ) numbered
+    ) history ON history.age_rows = 250
+    WHERE history.adv20 IS NOT NULL
 ), ranked AS (
     SELECT
         asset_id, as_of_date, value,

@@ -33,7 +33,7 @@
     "research_definition_hash": "f40629724a4d92f3",
     "sql": "pipeline/gold/factors/trading_turnover_20d.sql",
     "value_contract": "raw_value_direction_adjusted_rank_v1",
-    "version": 3
+    "version": 4
   },
   "return_kurtosis_24m": {
     "allow_tolerance_equivalent_ranks": true,
@@ -54,6 +54,6 @@
     "research_definition_hash": "4479bbca3166012f",
     "sql": "pipeline/gold/factors/turnover_volatility_12m.sql",
     "value_contract": "raw_value_direction_adjusted_rank_v1",
-    "version": 3
+    "version": 4
   }
 }

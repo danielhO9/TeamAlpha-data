@@ -151,8 +151,9 @@ def test_turnover_uses_current_plus_previous_nineteen_rows():
     sql = (ROOT / MANIFEST["trading_turnover_20d"]["sql"]).read_text(
         encoding="utf-8"
     )
-    assert "ROWS BETWEEN 19 PRECEDING AND CURRENT ROW" in sql
+    assert "recent_rank <= 20" in sql
     assert "adv20 > 0" not in sql
+    assert "LIMIT 250" in sql
 
 
 def test_new_factors_preserve_pit_and_rolling_contracts():
@@ -168,7 +169,7 @@ def test_new_factors_preserve_pit_and_rolling_contracts():
 
     assert "f.available_date <= u.as_of_date" in roce
     assert "fy.fy_end - interval '370 days'" in roce
-    assert "ROWS BETWEEN 251 PRECEDING AND CURRENT ROW" in turnover_volatility
+    assert "LIMIT 271" in turnover_volatility
     assert "stddev_samp(log_turnover)" in turnover_volatility
     assert "ROWS BETWEEN 503 PRECEDING AND CURRENT ROW" in kurtosis
     assert "LIMIT 505" in kurtosis
@@ -185,7 +186,7 @@ def test_runner_accepts_structured_publisher_contract():
     spec = MANIFEST["trading_turnover_20d"]
     path = ROOT / spec["sql"]
     metadata = {
-        "version": 3,
+        "version": spec["version"],
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
         "implementation_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -204,7 +205,7 @@ def test_runner_rejects_a_different_research_definition():
     spec = MANIFEST["trading_turnover_20d"]
     path = ROOT / spec["sql"]
     metadata = {
-        "version": 3,
+        "version": spec["version"],
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
         "implementation_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -230,7 +231,7 @@ def test_runner_binds_exact_daily_range_and_commits(monkeypatch):
     metadata = {
         "factor_id": 42,
         "factor_key": "trading_turnover_20d",
-        "version": 3,
+        "version": spec["version"],
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
         "implementation_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
