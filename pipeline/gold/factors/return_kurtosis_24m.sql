@@ -3,14 +3,26 @@
 -- pandas-compatible unbiased Fisher excess kurtosis.
 -- 최소 378개(75 percent) 유효 수익률을 요구한다.
 -- predicted_sign = -1, 따라서 rank 1은 raw value가 가장 낮은 종목이다.
-WITH certified AS (
+WITH market_window_start AS (
+    SELECT min(trade_date) AS trade_date
+    FROM (
+        SELECT DISTINCT p.trade_date
+        FROM public.factor_price_feature_daily p
+        JOIN public.dq_run q
+          ON q.run_id = p.quality_run_id
+         AND q.status = 'CERTIFIED'
+        WHERE p.source = 'KRX'
+          AND p.market IN ('KOSPI', 'KOSDAQ')
+          AND p.trade_date <= %(end_date)s::date
+        ORDER BY p.trade_date DESC
+        LIMIT 505
+    ) recent_market_dates
+), certified AS (
     SELECT
         p.asset_id, a.name, a.instrument_type, p.trade_date,
-        p.adj_close, p.market_cap, p.market,
-        row_number() OVER (
-            PARTITION BY p.asset_id ORDER BY p.trade_date
-        ) AS age_days
+        p.adj_close, p.market_cap, p.market
     FROM public.factor_price_feature_daily p
+    CROSS JOIN market_window_start window_start
     JOIN public.asset a
       ON a.asset_id = p.asset_id
      AND a.exchange = 'KRX'
@@ -31,6 +43,7 @@ WITH certified AS (
     ) identifier ON true
     WHERE p.source = 'KRX'
       AND p.market IN ('KOSPI', 'KOSDAQ')
+      AND p.trade_date >= window_start.trade_date
       AND p.trade_date <= %(end_date)s::date
 ), daily_returns AS (
     SELECT
@@ -70,7 +83,6 @@ WITH certified AS (
       AND instrument_type = 'common_stock'
       AND name !~* '(스팩|SPAC)'
       AND position('리츠' in name) = 0
-      AND age_days >= 504
       AND market_cap > 0
       AND adj_close > 0
       AND n >= 378

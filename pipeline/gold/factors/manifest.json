@@ -45,7 +45,7 @@
     "research_definition_hash": "825970437d4d3f8e",
     "sql": "pipeline/gold/factors/return_kurtosis_24m.sql",
     "value_contract": "raw_value_direction_adjusted_rank_v1",
-    "version": 4
+    "version": 5
   },
   "turnover_volatility_12m": {
     "frequency": "daily",
