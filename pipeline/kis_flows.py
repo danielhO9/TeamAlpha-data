@@ -4,6 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+from pathlib import Path
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
 from zoneinfo import ZoneInfo
@@ -194,7 +198,74 @@ def collect_partition(client, aid, ticker, dates, venue, policy):
     return output
 
 
-def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refresh=False, client=None):
+def _collect_plan(client, manifest, policy, plan):
+    aid,ticker,venue,vd,mode = plan
+    if mode=='KRX_ONLY':
+        data,receipts=client.history('investor',ticker,'J',min(vd),max(vd))
+        if set(vd)-set(data):
+            raise ValueError('missing KRX component for non-NXT integrated series')
+        output=[silver.observation(aid,ticker,d,'UN','investor',
+                {**silver.investor(data[d]),'_derivation':'KRX_ONLY_VERIFIED_NON_NXT',
+                 '_market_evidence':next(r['evidence'] for r in manifest['nxt_intervals']
+                     if int(r['asset_id'])==aid and date.fromisoformat(r['start'])<=d<=date.fromisoformat(r['end']))},
+                receipts,policy) for d in vd]
+    else:
+        output=collect_partition(client,aid,ticker,vd,venue,policy)
+    # UN is independently delivered, not mislabeled as a derived sum.
+    if venue=='UN' and mode=='DIRECT':
+        krx,kr=client.history('investor',ticker,'J',min(vd),max(vd))
+        nxt,nr=client.history('investor',ticker,'NX',min(vd),max(vd))
+        if set(vd)-set(krx) or set(vd)-set(nxt):
+            raise ValueError('cannot derive UN without both market components')
+        for obs in output:
+            day=obs['trade_date']
+            values=silver.combined(silver.investor(krx[day]),silver.investor(nxt[day]),obs['values'])
+            # Bind all three source requests to the derived revision.
+            extra=[{'fetched_at':obs['first_observed_at'].isoformat(),'raw_uri':u} for u in obs['source_uris']]
+            obs.update(silver.observation(aid,ticker,day,'UN','investor',values,extra+kr+nr,policy))
+    return output
+
+
+def _checkpoint_keys(root):
+    """Inventory committed checkpoints once, avoiding thousands of resume GETs."""
+    prefix = root.rstrip('/') + '/market_flows/kis_history/checkpoints/'
+    if prefix.startswith('s3://'):
+        import boto3
+        bucket, _, key = prefix[5:].partition('/')
+        pages = boto3.client('s3').get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=key)
+        names = (obj['Key'][len(key):] for page in pages for obj in page.get('Contents', [])
+                 if obj['Size'] > 0)
+    else:
+        names = (p.name for p in Path(prefix).glob('*.json') if p.stat().st_size > 0)
+    return {name[:-5] for name in names if re.fullmatch(r'[0-9a-f]{64}\.json', name)}
+
+
+def _prefetch(plans, collect, workers):
+    """Bound both in-flight reads and buffered partitions; the caller alone writes SQL."""
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='kis-history') as pool:
+        pending = deque()
+        iterator = iter(plans)
+        try:
+            for _ in range(workers):
+                item = next(iterator, None)
+                if item is None:
+                    break
+                pending.append((item, pool.submit(collect, item)))
+            while pending:
+                item, future = pending.popleft()
+                yield item, future
+                item = next(iterator, None)
+                if item is not None:
+                    pending.append((item, pool.submit(collect, item)))
+        finally:
+            for _, future in pending:
+                future.cancel()
+
+
+def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refresh=False, client=None, workers=None):
+    workers=int(os.environ.get('KIS_HISTORY_WORKERS','1') if workers is None else workers)
+    if not 1<=workers<=32:
+        raise ValueError('KIS history workers must be between 1 and 32')
     if start<date(2015,1,1) or start>end or end>=datetime.now(ZoneInfo('Asia/Seoul')).date():
         raise ValueError('require completed dates from 2015 onward')
     manifest=read_json(manifest_uri)
@@ -206,7 +277,7 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
         migrate.assert_current(conn)
     partitions=expected_partitions(conn,manifest,start,end,policy.get('calendar_exclusions',[]))
     client=client or Client(root)
-    summary={'partitions':len(partitions),'published':0,'bronze_only':not publish,'failures':[],
+    summary={'partitions':len(partitions),'skipped_partitions':0,'workers':workers,'published':0,'bronze_only':not publish,'failures':[],
              'universe_as_of':manifest['as_of'],'universe_hash':claimed,
              'assets_without_expected_dates':sorted(set(manifest['asset_ids'])-{k[0] for k in partitions})}
     plans=[]
@@ -221,35 +292,23 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
             if ineligible and 'UN' in venues:
                 entries.append(('UN',ineligible,'KRX_ONLY'))
         plans.extend((aid,ticker,venue,vd,mode) for venue,vd,mode in entries)
-    for aid,ticker,venue,vd,mode in plans:
-        key=digest({'aid':aid,'ticker':ticker,'dates':[d.isoformat() for d in vd],
-                    'venue':venue,'mode':mode,'policy':policy,'universe':claimed})
-        checkpoint=f'{root}/market_flows/kis_history/checkpoints/{key}.json'
-        if not refresh and publish and read_bytes(checkpoint):continue
+    completed = _checkpoint_keys(root) if publish and not refresh else set()
+    def pending_plans():
+        for plan in plans:
+            aid,ticker,venue,vd,mode=plan
+            # Deliberately unchanged: execution speed must not invalidate resume keys.
+            key=digest({'aid':aid,'ticker':ticker,'dates':[d.isoformat() for d in vd],
+                        'venue':venue,'mode':mode,'policy':policy,'universe':claimed})
+            checkpoint=f'{root}/market_flows/kis_history/checkpoints/{key}.json'
+            if key in completed:
+                summary['skipped_partitions']+=1
+                continue
+            yield plan,key,checkpoint
+    for (plan,key,checkpoint),future in _prefetch(pending_plans(),
+            lambda item: _collect_plan(client,manifest,policy,item[0]), workers):
+        aid,ticker,venue,vd,mode=plan
         try:
-            if mode=='KRX_ONLY':
-                data,receipts=client.history('investor',ticker,'J',min(vd),max(vd))
-                if set(vd)-set(data):
-                    raise ValueError('missing KRX component for non-NXT integrated series')
-                output=[silver.observation(aid,ticker,d,'UN','investor',
-                        {**silver.investor(data[d]),'_derivation':'KRX_ONLY_VERIFIED_NON_NXT',
-                         '_market_evidence':next(r['evidence'] for r in manifest['nxt_intervals']
-                             if int(r['asset_id'])==aid and date.fromisoformat(r['start'])<=d<=date.fromisoformat(r['end']))},
-                        receipts,policy) for d in vd]
-            else:
-                output=collect_partition(client,aid,ticker,vd,venue,policy)
-            # UN is independently delivered, not mislabeled as a derived sum.
-            if venue=='UN' and mode=='DIRECT':
-                krx,kr=client.history('investor',ticker,'J',min(vd),max(vd))
-                nxt,nr=client.history('investor',ticker,'NX',min(vd),max(vd))
-                if set(vd)-set(krx) or set(vd)-set(nxt):
-                    raise ValueError('cannot derive UN without both market components')
-                for obs in output:
-                    day=obs['trade_date']
-                    values=silver.combined(silver.investor(krx[day]),silver.investor(nxt[day]),obs['values'])
-                    # Bind all three source requests to the derived revision.
-                    extra=[{'fetched_at':obs['first_observed_at'].isoformat(),'raw_uri':u} for u in obs['source_uris']]
-                    obs.update(silver.observation(aid,ticker,day,'UN','investor',values,extra+kr+nr,policy))
+            output=future.result()
             if publish:
                 run_id=silver.publish(conn,output,fingerprint=key)
                 write_text(json.dumps({'run_id':run_id,'rows':len(output)}),checkpoint)
