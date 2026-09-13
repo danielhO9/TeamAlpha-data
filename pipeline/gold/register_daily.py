@@ -1,4 +1,4 @@
-"""Register immutable daily-v2 Gold factor metadata as research candidates."""
+"""Register immutable daily Gold factor metadata as research candidates."""
 from __future__ import annotations
 
 import argparse
@@ -108,7 +108,7 @@ def main() -> None:
     finally:
         conn.close()
     mode = "APPLY" if args.apply else "DRY-RUN/ROLLBACK"
-    print(f"daily-v2 candidates={created} ({mode})")
+    print(f"daily candidates={created} ({mode})")
 
 
 if __name__ == "__main__":

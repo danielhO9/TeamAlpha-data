@@ -87,7 +87,7 @@ rank         = 같은 날짜 KOSPI·KOSDAQ 유니버스 내 value 내림차순 �
 ```
 
 - 구현: [`pipeline/gold/factors/momentum_12_1.sql`](pipeline/gold/factors/momentum_12_1.sql)
-- 입력: `public.price_daily`의 KRX `adj_close`
+- 입력: `public.factor_price_feature_daily`의 KRX `adj_close`
 - 유니버스: 최신 `as_of_date`에 KOSPI 또는 KOSDAQ인 `stock`
 - 현재 단계: 메타데이터와 계산 SQL만 보존; 임시 2026-07 값은 제거됨
 - 미확정: IC 계산 방식, 평가 기간, 최소 관측치, 승인 임계값, 자동 갱신 주기

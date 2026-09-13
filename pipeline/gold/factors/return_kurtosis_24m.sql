@@ -1,16 +1,16 @@
 -- return_kurtosis_24m daily Gold implementation.
--- value = 최근 504 KRX 거래일 total_return_close 일수익률의
+-- value = 최근 504 KRX 거래일 feature-safe adj_close 일수익률의
 -- pandas-compatible unbiased Fisher excess kurtosis.
 -- 최소 378개(75 percent) 유효 수익률을 요구한다.
 -- predicted_sign = -1, 따라서 rank 1은 raw value가 가장 낮은 종목이다.
 WITH certified AS (
     SELECT
         p.asset_id, a.name, a.instrument_type, p.trade_date,
-        p.total_return_close, p.market_cap, p.market,
+        p.adj_close, p.market_cap, p.market,
         row_number() OVER (
             PARTITION BY p.asset_id ORDER BY p.trade_date
         ) AS age_days
-    FROM public.price_daily p
+    FROM public.factor_price_feature_daily p
     JOIN public.asset a
       ON a.asset_id = p.asset_id
      AND a.exchange = 'KRX'
@@ -35,8 +35,8 @@ WITH certified AS (
 ), daily_returns AS (
     SELECT
         certified.*,
-        total_return_close::double precision
-            / lag(total_return_close::double precision) OVER (
+        adj_close::double precision
+            / lag(adj_close::double precision) OVER (
                 PARTITION BY asset_id ORDER BY trade_date
               ) - 1.0 AS daily_return
     FROM certified
@@ -49,7 +49,7 @@ WITH certified AS (
       AND position('리츠' in name) = 0
       AND age_days >= 504
       AND market_cap > 0
-      AND total_return_close > 0
+      AND adj_close > 0
 ), moments AS (
     SELECT
         t.asset_id, t.trade_date AS as_of_date,

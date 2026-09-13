@@ -24,6 +24,7 @@ from pipeline.bronze import (
     stock_krxapi,
 )
 from pipeline.common.paths import base_uri, ymd_to_dash
+from pipeline.gold import run as gold_run
 from pipeline.silver import load
 from pipeline.silver import fmp_load
 from pipeline.silver.dart_action_snapshot import DEFAULT_COVERAGE_START
@@ -246,6 +247,9 @@ def _main_locked(
         if collect_alternative:
             alternative_data_incremental.run(day, conn=certification_lock)
         kis_flows.daily(day, conn=certification_lock)
+        gold_run.run_approved_daily(
+            certification_lock, as_of_date=coverage_end, apply=True,
+        )
         _run_fmp_incremental(
             bucket, root, day, certification_lock=certification_lock,
         )
@@ -281,6 +285,9 @@ def _main_locked(
             assert_epoch()
             alternative_data_incremental.run(day, conn=certification_lock)
         kis_flows.daily(day, conn=certification_lock)
+        gold_run.run_approved_daily(
+            certification_lock, as_of_date=coverage_end, apply=True,
+        )
         _run_fmp_incremental(
             bucket, root, day, certification_lock=certification_lock,
         )
@@ -640,6 +647,12 @@ def _main_locked(
         alternative_data_incremental.run(day, conn=certification_lock)
 
     kis_flows.daily(day, conn=certification_lock)
+
+    # Gold replaces only this closed KRX date.  Historical source rows remain
+    # read-only inputs; retries deterministically replace the same partition.
+    gold_run.run_approved_daily(
+        certification_lock, as_of_date=coverage_end, apply=True,
+    )
 
     # FMP is a separate source transaction. KRX/DART remains committed if FMP
     # later fails, and a task retry safely reuses the immutable raw objects.

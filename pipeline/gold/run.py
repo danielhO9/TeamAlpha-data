@@ -19,8 +19,8 @@ ALLOWED_SILVER_RELATIONS = frozenset({
     "public.asset_identifier",
     "public.corporate_action",
     "public.dq_run",
+    "public.factor_price_feature_daily",
     "public.fundamental",
-    "public.price_daily",
 })
 
 
@@ -237,6 +237,62 @@ def run_factor(
     except Exception:
         conn.rollback()
         raise
+
+
+def run_approved_daily(
+    conn,
+    *,
+    as_of_date: date | str,
+    apply: bool,
+) -> dict[str, int]:
+    """Replace one date partition for every approved daily factor.
+
+    Candidate definitions are deliberately ignored.  This lets the daily
+    Silver task ship the execution path before a human promotion decision,
+    while the database status remains the publication authority.
+    """
+    target = _parse_date(as_of_date)
+    manifest = load_manifest()
+    approved: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT factor_key
+            FROM gold.factor
+            WHERE status = 'APPROVED'
+              AND (factor_key, version) IN (
+                  SELECT * FROM unnest(%s::text[], %s::integer[])
+              )
+            ORDER BY factor_key
+            """,
+            (
+                list(manifest),
+                [int(spec["version"]) for spec in manifest.values()],
+            ),
+        )
+        approved = [row[0] for row in cur.fetchall()]
+    results: dict[str, int] = {}
+    for factor_key in approved:
+        affected = run_factor(
+            conn,
+            factor_key=factor_key,
+            start_date=target,
+            end_date=target,
+            apply=apply,
+        )
+        results[factor_key] = affected
+        mode = "APPLY" if apply else "DRY-RUN/ROLLBACK"
+        print(
+            f"[gold] factor={factor_key} date={target.isoformat()} "
+            f"rows={affected:,} mode={mode}",
+            flush=True,
+        )
+    if not approved:
+        print(
+            f"[gold] no approved daily factors date={target.isoformat()}",
+            flush=True,
+        )
+    return results
 
 
 def main() -> None:

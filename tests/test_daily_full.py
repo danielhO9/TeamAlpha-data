@@ -63,6 +63,11 @@ def _stub_main(monkeypatch, *, events: list[str]) -> None:
         "run",
         lambda day, *, conn: None,
     )
+    monkeypatch.setattr(
+        daily_full.gold_run,
+        "run_approved_daily",
+        lambda conn, *, as_of_date, apply: {},
+    )
     lock = object()
     monkeypatch.setattr(
         daily_full.dart_silver_backfill_ecs,

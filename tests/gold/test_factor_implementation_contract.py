@@ -8,6 +8,7 @@ import pytest
 
 from pipeline.gold import run
 from pipeline.gold.register_daily import candidate_rows
+from pipeline.gold.promote_daily import promote
 from pipeline.gold.run import build_replace_sql, validate_contract, validate_query_sql
 
 
@@ -32,14 +33,14 @@ def test_allowlisted_factor_sql_files_exist_and_have_stable_hashes():
         assert len(hashlib.sha256(path.read_bytes()).hexdigest()) == 64
         assert spec["value_contract"] == "raw_value_direction_adjusted_rank_v1"
         assert spec["frequency"] == "daily"
-        assert spec["version"] == 2
+        assert spec["version"] == 3
         assert len(spec["research_definition_hash"]) == 16
 
 
 def test_daily_candidate_metadata_is_complete_and_immutable():
     rows = candidate_rows()
     assert {row["factor_key"] for row in rows} == set(MANIFEST)
-    assert all(row["version"] == 2 for row in rows)
+    assert all(row["version"] == 3 for row in rows)
     assert all(row["config"]["frequency"] == "daily" for row in rows)
     assert all(len(row["implementation_hash"]) == 64 for row in rows)
 
@@ -93,6 +94,18 @@ def test_factor_sql_rejects_gold_or_current_state_relations():
             assert "Silver relation" in str(exc)
         else:
             raise AssertionError(f"forbidden relation accepted: {relation}")
+
+
+def test_all_daily_factor_sql_uses_feature_safe_price_projection():
+    for spec in MANIFEST.values():
+        sql = (ROOT / spec["sql"]).read_text(encoding="utf-8")
+        body = "\n".join(
+            line for line in sql.splitlines()
+            if not line.lstrip().startswith("--")
+        )
+        assert "public.factor_price_feature_daily" in body
+        assert "public.price_daily" not in body
+        assert "total_return_close" not in body
 
 
 def test_runner_atomically_replaces_exact_daily_partitions():
@@ -170,7 +183,7 @@ def test_runner_accepts_structured_publisher_contract():
     spec = MANIFEST["trading_turnover_20d"]
     path = ROOT / spec["sql"]
     metadata = {
-        "version": 2,
+        "version": 3,
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
         "implementation_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -189,7 +202,7 @@ def test_runner_rejects_a_different_research_definition():
     spec = MANIFEST["trading_turnover_20d"]
     path = ROOT / spec["sql"]
     metadata = {
-        "version": 2,
+        "version": 3,
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
         "implementation_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -215,7 +228,7 @@ def test_runner_binds_exact_daily_range_and_commits(monkeypatch):
     metadata = {
         "factor_id": 42,
         "factor_key": "trading_turnover_20d",
-        "version": 2,
+        "version": 3,
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
         "implementation_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -258,3 +271,58 @@ def test_runner_rejects_reversed_daily_range_before_db_work():
             end_date="2026-09-01",
             apply=False,
         )
+
+
+def test_daily_runner_only_executes_approved_manifest_versions(monkeypatch):
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = [
+        ("market_leverage",),
+        ("trading_turnover_20d",),
+    ]
+    calls = []
+    monkeypatch.setattr(
+        run,
+        "run_factor",
+        lambda conn, **kwargs: calls.append(kwargs) or 17,
+    )
+
+    results = run.run_approved_daily(
+        conn, as_of_date="2026-09-11", apply=True,
+    )
+
+    assert results == {
+        "market_leverage": 17,
+        "trading_turnover_20d": 17,
+    }
+    assert {call["factor_key"] for call in calls} == set(results)
+    assert all(call["start_date"] == date(2026, 9, 11) for call in calls)
+    assert all(call["end_date"] == date(2026, 9, 11) for call in calls)
+    conn.rollback.assert_not_called()
+
+
+def test_promote_daily_records_explicit_human_approval(monkeypatch):
+    rows = iter(
+        (
+            80 + index,
+            "CANDIDATE",
+            f"repo://TeamAlpha-data/{spec['sql']}",
+            hashlib.sha256((ROOT / spec["sql"]).read_bytes()).hexdigest(),
+            {"frequency": "daily"},
+        )
+        for index, spec in enumerate(MANIFEST.values(), start=1)
+    )
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchone.side_effect = lambda: next(rows)
+
+    promoted = promote(conn, approved_by="user", apply=True)
+
+    assert promoted == len(MANIFEST)
+    conn.commit.assert_called_once_with()
+    updates = [
+        call for call in cursor.execute.call_args_list
+        if "WHERE factor_id = %s" in call.args[0]
+    ]
+    assert len(updates) == len(MANIFEST)
+    assert all('"passed": true' in call.args[1][0] for call in updates)

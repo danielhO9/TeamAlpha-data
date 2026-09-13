@@ -6,12 +6,12 @@
 WITH certified_prices AS (
     SELECT
         p.asset_id, a.name, a.instrument_type, p.trade_date,
-        p.total_return_close, p.market_cap, p.market,
+        p.adj_close, p.market_cap, p.market,
         row_number() OVER (
             PARTITION BY p.asset_id ORDER BY p.trade_date
         ) AS age_days,
         min(p.trade_date) OVER (PARTITION BY p.asset_id) AS first_seen
-    FROM public.price_daily p
+    FROM public.factor_price_feature_daily p
     JOIN public.asset a
       ON a.asset_id = p.asset_id
      AND a.exchange = 'KRX'
@@ -45,7 +45,7 @@ WITH certified_prices AS (
       AND position('리츠' in name) = 0
       AND age_days >= 250
       AND market_cap > 0
-      AND total_return_close > 0
+      AND adj_close > 0
 ), revisions AS (
     SELECT
         u.asset_id, u.as_of_date, u.signal_date,

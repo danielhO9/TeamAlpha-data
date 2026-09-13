@@ -448,7 +448,8 @@ rank  = 같은 as_of_date KOSPI·KOSDAQ 유니버스 내 내림차순 순위
 있습니다. 연구 단계에서는 이 쿼리를 Python 정의와 대조하고, 운영 실행기는 검증된 동일 쿼리에
 공통 날짜 파티션 교체를 감쌉니다. `python -m pipeline.gold.run --factor <key>
 --as-of-date YYYY-MM-DD` 또는 `--from-date`/`--to-date`는 `--apply`가 없으면
-rollback합니다. 일별 v2는 거래일마다 전체 유니버스를 다시 랭킹합니다. Gold는
+rollback합니다. 일별 v3는 feature-safe `adj_close`만 사용하고 거래일마다 전체
+유니버스를 다시 랭킹합니다. Gold는
 Silver 재무제표 초기 적재, 봉인 OOS 통과와 사람 승인이 끝난 뒤 daily task에
 연결합니다.
 
@@ -500,7 +501,8 @@ Critical/Error 중 단일 행 불변조건은 RDS CHECK·PK·UNIQUE·FK로도 �
 따라서 애플리케이션 품질검사를 우회한 쓰기도 DB에서 거부되며, 시계열·소스 간 대사와
 Warning은 계속 Python 품질 게이트에서 검사합니다.
 
-Gold 팩터는 평가 정책과 갱신 주기가 확정되기 전까지 daily 흐름에 포함하지 않습니다.
+승인된 일별 Gold 팩터는 Silver 인증 완료 후 대상 거래일 파티션만 교체합니다.
+후보 상태의 구현은 daily 흐름에서 자동으로 제외합니다.
 
 KRX OpenAPI는 당일 데이터를 안정적으로 제공하지 않기 때문에 다음날 오전에 전날 데이터를 가져옵니다.
 
