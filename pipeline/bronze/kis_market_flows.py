@@ -129,24 +129,37 @@ def _request(
     path: str,
     tr_id: str,
     params: dict[str, str],
+    before_request=None,
+    on_retry=None,
 ) -> tuple[bytes, dict[str, Any], dict[str, str]]:
     appkey = _credential("KIS_APP_KEY")
     appsecret = _credential("KIS_APP_SECRET")
     for attempt in range(RATE_LIMIT_RETRIES + 1):
-        response = session.get(
-            f"{API_ROOT}{path}",
-            headers={
-                "Content-Type": "application/json; charset=UTF-8",
-                "authorization": f"Bearer {access_token}",
-                "appkey": appkey,
-                "appsecret": appsecret,
-                "tr_id": tr_id,
-                "custtype": "P",
-                "tr_cont": "",
-            },
-            params=params,
-            timeout=30,
-        )
+        if before_request is not None:
+            before_request()
+        try:
+            response = session.get(
+                f"{API_ROOT}{path}",
+                headers={
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "authorization": f"Bearer {access_token}",
+                    "appkey": appkey,
+                    "appsecret": appsecret,
+                    "tr_id": tr_id,
+                    "custtype": "P",
+                    "tr_cont": "",
+                },
+                params=params,
+                timeout=30,
+            )
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == RATE_LIMIT_RETRIES:
+                raise
+            delay = REQUEST_INTERVAL_SECONDS * 2 ** attempt
+            if on_retry is not None:
+                on_retry('NETWORK', delay)
+            time.sleep(delay)
+            continue
         raw = response.content
         try:
             payload = response.json()
@@ -157,10 +170,13 @@ def _request(
         if response.status_code == 200 and str(payload.get("rt_cd")) == "0":
             break
         if (
-            payload.get("msg_cd") == "EGW00201"
+            payload.get("msg_cd") in {"EGW00201", "EGW00316"}
             and attempt < RATE_LIMIT_RETRIES
         ):
-            time.sleep(REQUEST_INTERVAL_SECONDS * (attempt + 1))
+            delay = REQUEST_INTERVAL_SECONDS * 2 ** attempt
+            if on_retry is not None:
+                on_retry(payload["msg_cd"], delay)
+            time.sleep(delay)
             continue
         raise RuntimeError(
             "KIS data request failed: "
