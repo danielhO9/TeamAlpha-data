@@ -151,9 +151,11 @@ def test_turnover_uses_current_plus_previous_nineteen_rows():
     sql = (ROOT / MANIFEST["trading_turnover_20d"]["sql"]).read_text(
         encoding="utf-8"
     )
-    assert "recent_rank <= 20" in sql
+    assert "ROWS BETWEEN 19 PRECEDING AND CURRENT ROW" in sql
     assert "adv20 > 0" not in sql
-    assert "LIMIT 250" in sql
+    assert "LIMIT 249" in sql
+    assert "rolling.age_rows >= 250" in sql
+    assert sql.count("CROSS JOIN LATERAL") == 1
 
 
 def test_new_factors_preserve_pit_and_rolling_contracts():
@@ -169,8 +171,10 @@ def test_new_factors_preserve_pit_and_rolling_contracts():
 
     assert "f.available_date <= u.as_of_date" in roce
     assert "fy.fy_end - interval '370 days'" in roce
-    assert "LIMIT 271" in turnover_volatility
-    assert "stddev_samp(log_turnover)" in turnover_volatility
+    assert "LIMIT 270" in turnover_volatility
+    assert "ROWS BETWEEN 251 PRECEDING AND CURRENT ROW" in turnover_volatility
+    assert "stddev_samp(value) OVER recent_252" in turnover_volatility
+    assert turnover_volatility.count("CROSS JOIN LATERAL") == 1
     assert "ROWS BETWEEN 503 PRECEDING AND CURRENT ROW" in kurtosis
     assert "LIMIT 505" in kurtosis
     assert "p.trade_date <= %(start_date)s::date" in kurtosis
