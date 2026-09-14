@@ -254,7 +254,10 @@ def run_approved_daily(
     """
     target = _parse_date(as_of_date)
     manifest = load_manifest()
+    from pipeline.gold.bulk_daily import LEGACY_FACTOR_KEYS, run_bulk
+
     approved: list[str] = []
+    legacy_ready = 0
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
@@ -273,6 +276,17 @@ def run_approved_daily(
                 ),
             )
             approved = [row[0] for row in cur.fetchall()]
+            cur.execute(
+                """
+                SELECT count(*)
+                FROM gold.factor
+                WHERE status='APPROVED'
+                  AND factor_key=ANY(%s)
+                  AND config->>'frequency'='daily'
+                """,
+                (list(LEGACY_FACTOR_KEYS),),
+            )
+            legacy_ready = cur.fetchone()[0]
     results: dict[str, int] = {}
     for factor_key in approved:
         affected = run_factor(
@@ -286,6 +300,20 @@ def run_approved_daily(
         mode = "APPLY" if apply else "DRY-RUN/ROLLBACK"
         print(
             f"[gold] factor={factor_key} date={target.isoformat()} "
+            f"rows={affected:,} mode={mode}",
+            flush=True,
+        )
+    # Legacy definitions share the same daily price and PIT-financial panel.
+    # Execute them as one batch so the daily increment does not rescan Silver
+    # once per factor.
+    if isinstance(legacy_ready, int) and legacy_ready == len(LEGACY_FACTOR_KEYS):
+        affected = run_bulk(
+            conn, start_date=target, end_date=target, apply=apply
+        )
+        results["legacy_daily_bulk"] = affected
+        mode = "APPLY" if apply else "DRY-RUN/ROLLBACK"
+        print(
+            f"[gold] factor=legacy_daily_bulk date={target.isoformat()} "
             f"rows={affected:,} mode={mode}",
             flush=True,
         )
