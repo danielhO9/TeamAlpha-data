@@ -13,7 +13,10 @@ WITH market_window_start AS (
          AND q.status = 'CERTIFIED'
         WHERE p.source = 'KRX'
           AND p.market IN ('KOSPI', 'KOSDAQ')
-          AND p.trade_date <= %(end_date)s::date
+          -- Daily increments have start_date=end_date. Historical ranges
+          -- must seed from their first target date so early partitions keep
+          -- the same 504-session lookback as the final partition.
+          AND p.trade_date <= %(start_date)s::date
         ORDER BY p.trade_date DESC
         LIMIT 505
     ) recent_market_dates

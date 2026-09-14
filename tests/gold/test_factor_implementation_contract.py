@@ -173,6 +173,7 @@ def test_new_factors_preserve_pit_and_rolling_contracts():
     assert "stddev_samp(log_turnover)" in turnover_volatility
     assert "ROWS BETWEEN 503 PRECEDING AND CURRENT ROW" in kurtosis
     assert "LIMIT 505" in kurtosis
+    assert "p.trade_date <= %(start_date)s::date" in kurtosis
     assert "p.trade_date >= window_start.trade_date" in kurtosis
     assert "daily_return" in kurtosis
     assert "sample_variance" in kurtosis
