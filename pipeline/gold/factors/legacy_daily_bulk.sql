@@ -2,7 +2,7 @@
 -- Month windows are translated to 21 KRX sessions per month.  Price history,
 -- PIT financial state, and rolling primitives are built once per range.
 -- gold-statement
-CREATE TEMP TABLE _gold_price_base ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_price_base ON COMMIT PRESERVE ROWS AS
 WITH history_start AS (
     SELECT min(trade_date) AS trade_date
     FROM (
@@ -63,7 +63,7 @@ CREATE INDEX ON _gold_price_base(asset_id, trade_date);
 ANALYZE _gold_price_base;
 
 -- gold-statement
-CREATE TEMP TABLE _gold_price_roll_1 ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_price_roll_1 ON COMMIT PRESERVE ROWS AS
 SELECT
     p.*,
     avg(trading_value) OVER w20 AS adv20,
@@ -114,7 +114,7 @@ CREATE INDEX ON _gold_price_roll_1(asset_id, trade_date);
 ANALYZE _gold_price_roll_1;
 
 -- gold-statement
-CREATE TEMP TABLE _gold_market_returns ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_market_returns ON COMMIT PRESERVE ROWS AS
 SELECT trade_date, previous_market AS market,
        sum(weighted_return) / nullif(sum(return_weight), 0) AS market_return
 FROM _gold_price_roll_1
@@ -122,7 +122,7 @@ WHERE previous_market IS NOT NULL
 GROUP BY trade_date, previous_market;
 
 -- gold-statement
-CREATE TEMP TABLE _gold_price_roll_2 ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_price_roll_2 ON COMMIT PRESERVE ROWS AS
 WITH enriched AS (
     SELECT p.*,
            m.market_return,
@@ -189,7 +189,7 @@ CREATE INDEX ON _gold_price_roll_2(asset_id, trade_date);
 ANALYZE _gold_price_roll_2;
 
 -- gold-statement
-CREATE TEMP TABLE _gold_financial_states ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_financial_states ON COMMIT PRESERVE ROWS AS
 WITH target_assets AS (
     SELECT DISTINCT asset_id FROM _gold_price_base
 ), bounds AS (
@@ -317,7 +317,7 @@ CREATE INDEX ON _gold_financial_states(asset_id, state_date, next_state_date);
 ANALYZE _gold_financial_states;
 
 -- gold-statement
-CREATE TEMP TABLE _gold_daily_panel_1 ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_daily_panel_1 ON COMMIT PRESERVE ROWS AS
 SELECT p.*,
   f.total_equity,f.total_assets,f.capital_stock,f.current_assets,
   f.current_liabilities,f.total_liabilities,f.noncurrent_assets,
@@ -339,7 +339,7 @@ CREATE INDEX ON _gold_daily_panel_1(asset_id, trade_date);
 ANALYZE _gold_daily_panel_1;
 
 -- gold-statement
-CREATE TEMP TABLE _gold_daily_panel ON COMMIT DROP AS
+CREATE TEMP TABLE _gold_daily_panel ON COMMIT PRESERVE ROWS AS
 SELECT p.*,
   lag(book_to_market,126) OVER days AS book_to_market_lag_126,
   lag(book_to_market,252) OVER days AS book_to_market_lag_252,

@@ -5,7 +5,7 @@ import argparse
 import hashlib
 import json
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from pipeline.common import db
@@ -208,6 +208,46 @@ def _statements() -> list[str]:
     return [part.strip() for part in parts[1:] if part.strip()]
 
 
+def _configure_session(cur) -> None:
+    cur.execute("SET LOCAL work_mem='256MB'")
+    cur.execute("SET LOCAL maintenance_work_mem='512MB'")
+    cur.execute("SET LOCAL temp_buffers='128MB'")
+
+
+def _create_factor_ids(cur, factor_rows, *, preserve: bool = False) -> None:
+    on_commit = "PRESERVE ROWS" if preserve else "DROP"
+    cur.execute(
+        f"""
+        CREATE TEMP TABLE _gold_factor_ids(
+          factor_id bigint PRIMARY KEY,
+          factor_key text UNIQUE NOT NULL,
+          predicted_sign integer NOT NULL CHECK(predicted_sign IN (-1,1))
+        ) ON COMMIT {on_commit}
+        """
+    )
+    cur.executemany(
+        "INSERT INTO _gold_factor_ids VALUES (%s,%s,%s)", factor_rows
+    )
+
+
+def _validate_stage(cur) -> int:
+    cur.execute(
+        """
+        SELECT count(*),count(DISTINCT (factor_id,asset_id,as_of_date)),
+               count(*) FILTER (WHERE value::text IN
+                 ('NaN','Infinity','-Infinity') OR rank<=0)
+        FROM _gold_bulk_values
+        """
+    )
+    rows, distinct_rows, invalid = cur.fetchone()
+    if rows != distinct_rows or invalid:
+        raise RuntimeError(
+            "bulk Gold quality failed: "
+            f"rows={rows} distinct={distinct_rows} invalid={invalid}"
+        )
+    return rows
+
+
 def run_bulk(
     conn,
     *,
@@ -229,21 +269,8 @@ def run_bulk(
             # The production RDS default is deliberately small and makes the
             # shared asset/date window sorts spill excessively.  This task is
             # the only Gold writer, so use a bounded session-local allowance.
-            cur.execute("SET LOCAL work_mem='256MB'")
-            cur.execute("SET LOCAL maintenance_work_mem='512MB'")
-            cur.execute("SET LOCAL temp_buffers='128MB'")
-            cur.execute(
-                """
-                CREATE TEMP TABLE _gold_factor_ids(
-                  factor_id bigint PRIMARY KEY,
-                  factor_key text UNIQUE NOT NULL,
-                  predicted_sign integer NOT NULL CHECK(predicted_sign IN (-1,1))
-                ) ON COMMIT DROP
-                """
-            )
-            cur.executemany(
-                "INSERT INTO _gold_factor_ids VALUES (%s,%s,%s)", factor_rows
-            )
+            _configure_session(cur)
+            _create_factor_ids(cur, factor_rows)
             statements = _statements()
             for number, statement in enumerate(statements, 1):
                 stage_started = time.monotonic()
@@ -258,20 +285,7 @@ def run_bulk(
                     f"seconds={time.monotonic() - stage_started:.1f}",
                     flush=True,
                 )
-            cur.execute(
-                """
-                SELECT count(*),count(DISTINCT (factor_id,asset_id,as_of_date)),
-                       count(*) FILTER (WHERE value::text IN
-                         ('NaN','Infinity','-Infinity') OR rank<=0)
-                FROM _gold_bulk_values
-                """
-            )
-            rows, distinct_rows, invalid = cur.fetchone()
-            if rows != distinct_rows or invalid:
-                raise RuntimeError(
-                    "bulk Gold quality failed: "
-                    f"rows={rows} distinct={distinct_rows} invalid={invalid}"
-                )
+            rows = _validate_stage(cur)
             if validate_only:
                 return rows
             cur.execute(
@@ -293,6 +307,96 @@ def run_bulk(
     return affected
 
 
+def _year_chunks(start: date, end: date):
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(end, date(cursor.year, 12, 31))
+        yield cursor, chunk_end
+        cursor = chunk_end + timedelta(days=1)
+
+
+def run_shared_backfill(
+    conn,
+    *,
+    start_date: date | str,
+    end_date: date | str,
+    apply: bool,
+) -> int:
+    """Build the expensive history panel once, then commit yearly outputs."""
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    if end < start:
+        raise ValueError("Gold end_date precedes start_date")
+    statements = _statements()
+    prep, output = statements[:-1], statements[-1]
+    full_params = {"start_date": start, "end_date": end}
+
+    with conn.transaction():
+        factor_rows = _load_factor_ids(conn)
+        with conn.cursor() as cur:
+            _configure_session(cur)
+            _create_factor_ids(cur, factor_rows, preserve=True)
+            for number, statement in enumerate(prep, 1):
+                stage_started = time.monotonic()
+                print(
+                    f"[gold-backfill] prep={number}/{len(prep)} "
+                    f"range={start}..{end}", flush=True,
+                )
+                cur.execute(statement, full_params)
+                print(
+                    f"[gold-backfill] prep={number}/{len(prep)} done "
+                    f"seconds={time.monotonic() - stage_started:.1f}",
+                    flush=True,
+                )
+            # Only the final daily panel and factor map are needed while the
+            # yearly partitions are published.  Release the wide intermediates
+            # before permanent factor_value growth consumes their disk space.
+            cur.execute(
+                """
+                DROP TABLE _gold_price_base,_gold_price_roll_1,
+                  _gold_market_returns,_gold_price_roll_2,
+                  _gold_financial_states,_gold_daily_panel_1
+                """
+            )
+
+    total = 0
+    for chunk_start, chunk_end in _year_chunks(start, end):
+        params = {"start_date": chunk_start, "end_date": chunk_end}
+        with conn.transaction(force_rollback=not apply):
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL work_mem='256MB'")
+                stage_started = time.monotonic()
+                print(
+                    f"[gold-backfill] publish={chunk_start}..{chunk_end}",
+                    flush=True,
+                )
+                cur.execute(output, params)
+                rows = _validate_stage(cur)
+                cur.execute(
+                    """
+                    DELETE FROM gold.factor_value v USING _gold_factor_ids f
+                    WHERE v.factor_id=f.factor_id
+                      AND v.as_of_date BETWEEN %(start_date)s AND %(end_date)s
+                    """,
+                    params,
+                )
+                cur.execute(
+                    """
+                    INSERT INTO gold.factor_value(
+                      factor_id,asset_id,as_of_date,value,rank
+                    ) SELECT factor_id,asset_id,as_of_date,value,rank
+                      FROM _gold_bulk_values
+                    """
+                )
+                total += max(cur.rowcount, 0)
+                print(
+                    f"[gold-backfill] publish={chunk_start}..{chunk_end} "
+                    f"rows={rows:,} seconds={time.monotonic() - stage_started:.1f}",
+                    flush=True,
+                )
+    return total
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--register-and-promote", action="store_true")
@@ -303,6 +407,7 @@ def main() -> None:
     parser.add_argument("--to-date")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--shared-backfill", action="store_true")
     args = parser.parse_args()
     if args.from_date and not args.to_date:
         parser.error("--from-date requires --to-date")
@@ -316,12 +421,13 @@ def main() -> None:
             )
             print(f"legacy daily promoted={changed}")
         if args.as_of_date or args.from_date:
-            affected = run_bulk(
-                conn,
-                start_date=args.as_of_date or args.from_date,
-                end_date=args.as_of_date or args.to_date,
-                apply=args.apply,
-                validate_only=args.validate_only,
+            runner = run_shared_backfill if args.shared_backfill else run_bulk
+            affected = runner(
+                conn, start_date=args.as_of_date or args.from_date,
+                end_date=args.as_of_date or args.to_date, apply=args.apply,
+                **({} if args.shared_backfill else {
+                    "validate_only": args.validate_only
+                }),
             )
             print(f"legacy daily rows={affected:,}")
     finally:
