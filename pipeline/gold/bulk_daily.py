@@ -110,7 +110,9 @@ def register_and_promote(conn, *, approved_by: str, apply: bool) -> int:
                 )
                 existing = cur.fetchone()
                 if existing and existing[2] == "APPROVED":
-                    continue
+                    existing_config = existing[3]
+                    if existing_config.get("predicted_sign") in (-1, 1):
+                        continue
 
                 cur.execute(
                     "SELECT coalesce(max(version),0)+1 FROM gold.factor WHERE factor_key=%s",
@@ -122,6 +124,7 @@ def register_and_promote(conn, *, approved_by: str, apply: bool) -> int:
                 predicted_sign = int(config.get("predicted_sign", 1))
                 config.update({
                     "frequency": "daily",
+                    "predicted_sign": predicted_sign,
                     "lookback_translation": "21_krx_sessions_per_month",
                     "research_definition_hash": _daily_definition_hash(
                         old_definition, sql_hash
