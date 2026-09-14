@@ -172,9 +172,10 @@ def test_new_factors_preserve_pit_and_rolling_contracts():
     assert "f.available_date <= u.as_of_date" in roce
     assert "fy.fy_end - interval '370 days'" in roce
     assert "LIMIT 270" in turnover_volatility
-    assert "ROWS BETWEEN 251 PRECEDING AND CURRENT ROW" in turnover_volatility
-    assert "sum(value) OVER recent_252" in turnover_volatility
-    assert "sum(value * value) OVER recent_252" in turnover_volatility
+    assert "sum(value) OVER lifetime" in turnover_volatility
+    assert "sum(value * value) OVER lifetime" in turnover_volatility
+    assert "lag(value_sum_cumulative, 252)" in turnover_volatility
+    assert "lag(value_square_sum_cumulative, 252)" in turnover_volatility
     assert "value_square_sum" in turnover_volatility
     assert "stddev_samp" not in turnover_volatility
     assert turnover_volatility.count("CROSS JOIN LATERAL") == 1

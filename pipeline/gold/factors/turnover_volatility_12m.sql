@@ -109,18 +109,36 @@ WITH targets AS (
             THEN ln(adv20::double precision / market_cap::double precision)
         END AS value
     FROM daily_turnover
+), cumulative_moments AS (
+    SELECT
+        asset_id,
+        trade_date,
+        row_number() OVER lifetime AS lifetime_rows,
+        count(value) OVER lifetime AS valid_cumulative,
+        sum(value) OVER lifetime AS value_sum_cumulative,
+        sum(value * value) OVER lifetime AS value_square_sum_cumulative
+    FROM log_turnover
+    WINDOW lifetime AS (
+        PARTITION BY asset_id ORDER BY trade_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    )
 ), rolling_moments AS (
     SELECT
         asset_id,
         trade_date,
-        count(*) OVER recent_252 AS window_rows,
-        count(value) OVER recent_252 AS valid_observations,
-        sum(value) OVER recent_252 AS value_sum,
-        sum(value * value) OVER recent_252 AS value_square_sum
-    FROM log_turnover
-    WINDOW recent_252 AS (
+        least(lifetime_rows, 252) AS window_rows,
+        valid_cumulative - coalesce(
+            lag(valid_cumulative, 252) OVER asset_history, 0
+        ) AS valid_observations,
+        value_sum_cumulative - coalesce(
+            lag(value_sum_cumulative, 252) OVER asset_history, 0.0
+        ) AS value_sum,
+        value_square_sum_cumulative - coalesce(
+            lag(value_square_sum_cumulative, 252) OVER asset_history, 0.0
+        ) AS value_square_sum
+    FROM cumulative_moments
+    WINDOW asset_history AS (
         PARTITION BY asset_id ORDER BY trade_date
-        ROWS BETWEEN 251 PRECEDING AND CURRENT ROW
     )
 ), rolling_volatility AS (
     SELECT
