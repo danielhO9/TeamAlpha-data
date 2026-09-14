@@ -109,18 +109,36 @@ WITH targets AS (
             THEN ln(adv20::double precision / market_cap::double precision)
         END AS value
     FROM daily_turnover
-), rolling_volatility AS (
+), rolling_moments AS (
     SELECT
         asset_id,
         trade_date,
         count(*) OVER recent_252 AS window_rows,
         count(value) OVER recent_252 AS valid_observations,
-        stddev_samp(value) OVER recent_252 AS value
+        sum(value) OVER recent_252 AS value_sum,
+        sum(value * value) OVER recent_252 AS value_square_sum
     FROM log_turnover
     WINDOW recent_252 AS (
         PARTITION BY asset_id ORDER BY trade_date
         ROWS BETWEEN 251 PRECEDING AND CURRENT ROW
     )
+), rolling_volatility AS (
+    SELECT
+        asset_id,
+        trade_date,
+        window_rows,
+        valid_observations,
+        CASE
+            WHEN valid_observations > 1
+            THEN sqrt(greatest(
+                0.0::double precision,
+                (
+                    value_square_sum
+                    - value_sum * value_sum / valid_observations
+                ) / (valid_observations - 1)
+            ))
+        END AS value
+    FROM rolling_moments
 ), raw_values AS (
     SELECT
         t.asset_id, t.as_of_date, t.signal_date,
