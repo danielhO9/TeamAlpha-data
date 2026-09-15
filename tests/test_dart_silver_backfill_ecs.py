@@ -142,6 +142,52 @@ def test_prepare_snapshot_downloads_refreshes_builds_then_publishes(
     ]
 
 
+def test_action_preview_is_manifest_only_not_duplicate_full_parse(
+    monkeypatch, tmp_path,
+):
+    coverage_end = date(2026, 8, 10)
+    lock = object()
+    scale_metadata = {"contract": "scale"}
+    verified = SimpleNamespace(
+        coverage_start=date(2015, 1, 1),
+        coverage_end=coverage_end,
+        manifest_sha256="a" * 64,
+        cash_adjustment_scale_source_evidence=scale_metadata,
+    )
+    calls = []
+    monkeypatch.setattr(
+        ecs.dart_action_snapshot,
+        "verify_snapshot_manifest",
+        lambda *args, **kwargs: calls.append(("snapshot", args, kwargs))
+        or verified,
+    )
+    monkeypatch.setattr(
+        ecs.cash_adjustment_scale_evidence,
+        "verify_source_evidence_manifest",
+        lambda *args, **kwargs: calls.append(("scale", args, kwargs))
+        or SimpleNamespace(metadata=scale_metadata),
+    )
+    monkeypatch.setattr(
+        ecs.dart_extra_load,
+        "run",
+        lambda **kwargs: pytest.fail("duplicate full action preview reached"),
+    )
+    monkeypatch.setattr(
+        ecs, "assert_daily_certification_lock",
+        lambda connection: calls.append(("lock", connection)),
+    )
+    monkeypatch.setattr(
+        ecs, "certified_krx_price_coverage_end",
+        lambda **kwargs: coverage_end,
+    )
+
+    ecs.preview_total_return_actions(
+        coverage_end, root=tmp_path, conn=lock,
+    )
+
+    assert [call[0] for call in calls] == ["snapshot", "scale", "lock"]
+
+
 def test_retry_restore_requires_exact_published_coverage(monkeypatch, tmp_path):
     monkeypatch.setattr(ecs.boto3, "client", lambda _service: object())
     monkeypatch.setattr(
