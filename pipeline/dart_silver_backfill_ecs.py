@@ -225,20 +225,32 @@ def _download_changed(
     unique = {item.key: item for item in objects}
     changed: list[_S3Object] = []
     reused = 0
-    for key in sorted(unique):
-        item = unique[key]
-        destination = root / key
-        cached = index.get(key)
-        if (
-            cached == {"etag": item.etag, "size": item.size}
-            and destination.is_file()
-            and destination.stat().st_size == item.size
-        ):
-            reused += 1
-            continue
-        changed.append(item)
-        if changed_sink is not None:
-            changed_sink.append(item.key)
+
+    def cache_hit(item: _S3Object) -> bool:
+        destination = root / item.key
+        cached = index.get(item.key)
+        try:
+            return bool(
+                cached == {"etag": item.etag, "size": item.size}
+                and destination.is_file()
+                and destination.stat().st_size == item.size
+            )
+        except OSError:
+            return False
+
+    ordered = [unique[key] for key in sorted(unique)]
+    # EFS metadata latency dominates this phase when the snapshot contains
+    # ~170k cached bodies. Preserve deterministic ordering while issuing the
+    # independent read-only stat checks concurrently.
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        hits = executor.map(cache_hit, ordered)
+        for item, hit in zip(ordered, hits, strict=True):
+            if hit:
+                reused += 1
+                continue
+            changed.append(item)
+            if changed_sink is not None:
+                changed_sink.append(item.key)
 
     def one(item: _S3Object) -> None:
         destination = root / item.key
