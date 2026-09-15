@@ -306,6 +306,7 @@ def test_complete_current_manifest_is_atomically_refreshed_for_new_interval(
     first = _collect(
         tmp_path, apply=True, fetcher=remote,
     )
+    first_call_count = len(remote.calls)
     manifest = tmp_path / families.MANIFEST_RELATIVE_PATH
     first_bytes = manifest.read_bytes()
 
@@ -326,6 +327,7 @@ def test_complete_current_manifest_is_atomically_refreshed_for_new_interval(
     )
 
     assert refreshed.candidate_count == first.candidate_count
+    assert len(remote.calls) == first_call_count
     assert manifest.read_bytes() != first_bytes
     assert _verify(tmp_path) == refreshed
 

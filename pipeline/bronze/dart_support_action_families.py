@@ -2087,7 +2087,20 @@ def collect_support_action_families(
                 and previous_payload.get("source_contract") == SOURCE_CONTRACT
                 and previous_payload.get("seed_coverage_start")
                 == coverage_start.isoformat()
-                and previous_end < coverage_end
+                and (
+                    previous_end < coverage_end
+                    or (
+                        previous_end == coverage_end
+                        and int(previous_payload.get(
+                            "candidate_count", -1,
+                        )) == len(snapshot.candidates)
+                        and previous_payload.get("candidate_digest")
+                        == snapshot.candidate_digest
+                        and previous_payload.get(
+                            "disclosure_observation_audit"
+                        ) != snapshot.disclosure_audit
+                    )
+                )
             ):
                 previous_entries = _parse_entries(
                     previous_payload.get("entries")
