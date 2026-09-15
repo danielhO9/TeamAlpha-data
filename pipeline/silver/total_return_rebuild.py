@@ -2343,7 +2343,11 @@ def _changed_return_asset_ids(
     baseline: IncrementalBaseline,
     current_snapshot_run_id: UUID,
 ) -> list[int]:
-    """Return only assets whose return inputs changed since certification."""
+    """Rebuild changed inputs, broken history, and assets without a certified seed.
+
+    Uncertified trailing values use the append path; their numeric presence
+    does not make them reusable. Damage inside the baseline needs a full rebuild.
+    """
     action_projection = """
         SELECT asset_id,source,action_key,action_type,action_scope,
                announcement_date,ex_date,record_date,cash_amount,filing_id,
@@ -2393,20 +2397,26 @@ def _changed_return_asset_ids(
                     FROM price_daily p
                     JOIN asset a ON a.asset_id=p.asset_id
                     JOIN dq_run q ON q.run_id=p.quality_run_id
+                    LEFT JOIN dq_run tr ON tr.run_id=p.total_return_quality_run_id
                     WHERE p.source='KRX' AND q.status='CERTIFIED'
                       AND a.asset_type='stock'
                       AND a.instrument_type='common_stock'
                       AND a.exchange='KRX'
                       AND p.market IN ('KOSPI','KOSDAQ')
                       AND p.trade_date >= %s
-                      AND p.total_return_close IS NULL
-                      AND NOT EXISTS (
+                      AND (p.total_return_close IS NULL
+                           OR tr.status IS DISTINCT FROM 'CERTIFIED'
+                           OR tr.mode IS DISTINCT FROM 'krx_total_return_rebuild')
+                      AND (p.trade_date <= %s OR NOT EXISTS (
                           SELECT 1 FROM price_daily prior
+                          JOIN dq_run prior_q ON prior_q.run_id=prior.total_return_quality_run_id
                           WHERE prior.asset_id=p.asset_id
                             AND prior.source='KRX'
                             AND prior.trade_date < p.trade_date
                             AND prior.total_return_close IS NOT NULL
-                      )
+                            AND prior_q.status='CERTIFIED'
+                            AND prior_q.mode='krx_total_return_rebuild'
+                      ))
                  )
             SELECT DISTINCT asset_id FROM (
                 SELECT asset_id FROM changed
@@ -2425,6 +2435,7 @@ def _changed_return_asset_ids(
                 current_snapshot_run_id,
                 baseline.coverage_end,
                 CONTRACT_COVERAGE_START,
+                baseline.coverage_end,
             ),
         )
         return [int(row[0]) for row in cur.fetchall()]
@@ -2484,12 +2495,16 @@ def _append_unchanged_prices(
             FROM price_daily p
             JOIN asset a ON a.asset_id=p.asset_id
             JOIN dq_run q ON q.run_id=p.quality_run_id
+            LEFT JOIN dq_run tr ON tr.run_id=p.total_return_quality_run_id
             LEFT JOIN LATERAL (
                 SELECT h.trade_date,h.adj_close,h.total_return_close
                 FROM price_daily h
+                JOIN dq_run hq ON hq.run_id=h.total_return_quality_run_id
                 WHERE h.asset_id=p.asset_id AND h.source='KRX'
                   AND h.trade_date < p.trade_date
                   AND h.total_return_close IS NOT NULL
+                  AND hq.status='CERTIFIED'
+                  AND hq.mode='krx_total_return_rebuild'
                 ORDER BY h.trade_date DESC LIMIT 1
             ) prior ON true
             WHERE p.source='KRX' AND q.status='CERTIFIED'
@@ -2498,7 +2513,9 @@ def _append_unchanged_prices(
               AND a.exchange='KRX'
               AND p.market IN ('KOSPI','KOSDAQ')
               AND p.trade_date >= %s
-              AND p.total_return_close IS NULL
+              AND (p.total_return_close IS NULL
+                   OR tr.status IS DISTINCT FROM 'CERTIFIED'
+                   OR tr.mode IS DISTINCT FROM 'krx_total_return_rebuild')
               AND NOT (p.asset_id=ANY(%s))
             ORDER BY p.asset_id,p.trade_date
             """,
