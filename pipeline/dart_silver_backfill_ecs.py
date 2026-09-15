@@ -286,10 +286,11 @@ def _download_changed(
                         f"{done}/{len(changed)} reused={reused}",
                         flush=True,
                     )
+    # Every cache hit was size-checked above, and every downloaded object was
+    # size-checked before its atomic replace. Re-statting the entire EFS tree
+    # here would duplicate the slowest metadata scan without adding evidence.
     for item in unique.values():
-        destination = root / item.key
-        if destination.is_file() and destination.stat().st_size == item.size:
-            index[item.key] = {"etag": item.etag, "size": item.size}
+        index[item.key] = {"etag": item.etag, "size": item.size}
     _write_cache_index(root, index)
     print(
         "[dart-silver-ecs] persistent cache complete "
