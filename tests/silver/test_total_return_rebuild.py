@@ -95,6 +95,53 @@ def test_incremental_extension_only_calculates_new_rows_and_resets_after_gap():
     )
 
 
+class _IncrementalSummaryCursor:
+    def __init__(self):
+        self.statements = []
+        self.result_index = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def execute(self, sql, params=None):
+        self.statements.append(" ".join(sql.split()))
+
+    def fetchone(self):
+        results = [
+            (100, 2, date(2026, 1, 2), date(2026, 1, 5)),
+            (10, 6, 5, 4, 3, 2, 1),
+        ]
+        result = results[self.result_index]
+        self.result_index += 1
+        return result
+
+
+class _IncrementalSummaryConnection:
+    def __init__(self):
+        self.cursor_instance = _IncrementalSummaryCursor()
+
+    def cursor(self):
+        return self.cursor_instance
+
+
+def test_incremental_summary_counts_canonical_application_exclusions():
+    connection = _IncrementalSummaryConnection()
+    summary = RebuildSummary(apply=True)
+
+    rebuild._refresh_incremental_summary(connection, summary, uuid4())
+
+    semantic_sql = connection.cursor_instance.statements[1]
+    assert "count(*) FILTER ( WHERE (is_canonical" in semantic_sql
+    assert "'BEFORE_MARKET_COVERAGE'" in semantic_sql
+    assert "'PENDING_FUTURE_TRADE'" in semantic_sql
+    assert "'BEFORE_LISTING_OR_EPISODE_START'" in semantic_sql
+    assert "'LISTING_EPISODE_GAP'" in semantic_sql
+    assert summary.canonical_event_count == 6
+
+
 def test_build_batch_uses_database_half_up_cash_rounding():
     prices = _prices([
         (1, "1", date(2026, 1, 2), 100.0, 100.0),

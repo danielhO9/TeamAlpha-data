@@ -2584,7 +2584,18 @@ def _refresh_incremental_summary(conn, summary: RebuildSummary, run_id: UUID) ->
         cur.execute(
             """
             SELECT count(*),
-                   count(*) FILTER (WHERE is_canonical),
+                   count(*) FILTER (
+                       WHERE (is_canonical AND excluded_reason IS NULL)
+                          OR (
+                              NOT is_canonical
+                              AND excluded_reason IN (
+                                  'BEFORE_MARKET_COVERAGE',
+                                  'PENDING_FUTURE_TRADE',
+                                  'BEFORE_LISTING_OR_EPISODE_START',
+                                  'LISTING_EPISODE_GAP'
+                              )
+                          )
+                   ),
                    count(*) FILTER (
                        WHERE is_canonical AND excluded_reason IS NULL),
                    count(*) FILTER (
