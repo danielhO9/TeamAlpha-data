@@ -824,6 +824,8 @@ def _publish_generated_snapshot(
         entry = entries_by_path[relative]
         prior = previous_entries.get(relative)
         if previous is not None and prior == entry:
+            if previous.bundle_prefix == bundle_prefix:
+                return "reused"
             # A new manifest generation used to re-upload every unchanged
             # generated body from ECS. Copying the already authenticated
             # immutable object inside S3 keeps the bundle contract while
@@ -847,7 +849,7 @@ def _publish_generated_snapshot(
         )
         return "uploaded"
 
-    publication_counts = {"copied": 0, "uploaded": 0}
+    publication_counts = {"copied": 0, "uploaded": 0, "reused": 0}
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = [executor.submit(upload_one, path) for path in paths]
         for future in as_completed(futures):
@@ -890,7 +892,8 @@ def _publish_generated_snapshot(
     print(
         "[dart-silver-ecs] published immutable generated snapshot "
         f"objects={len(paths)} copied={publication_counts['copied']} "
-        f"uploaded={publication_counts['uploaded']} manifest={action_sha}",
+        f"uploaded={publication_counts['uploaded']} "
+        f"reused={publication_counts['reused']} manifest={action_sha}",
         flush=True,
     )
     return len(paths)
