@@ -62,7 +62,7 @@ def test_prepare_snapshot_downloads_refreshes_builds_then_publishes(
     monkeypatch.setattr(
         ecs,
         "_download_changed",
-        lambda bucket, objects, root: (
+        lambda bucket, objects, root, **kwargs: (
             downloads.append((bucket, list(objects), root)) or (len(objects), 0)
         ),
     )
@@ -888,6 +888,58 @@ def test_generated_snapshot_lost_epoch_leaves_current_pointer_unchanged(
 
     assert puts
     assert ecs._SNAPSHOT_CURRENT_KEY not in puts
+
+
+def test_generated_snapshot_copies_unchanged_body_from_previous_bundle(
+    tmp_path, monkeypatch,
+):
+    body = (
+        tmp_path / ecs.dart_viewer_corrections.MANIFEST_RELATIVE_PATH.parent
+        / "year=2026" / "viewer.html"
+    )
+    body.parent.mkdir(parents=True, exist_ok=True)
+    body.write_text("unchanged", encoding="utf-8")
+    action = _write_generated_action_manifest(tmp_path, (body,))
+    action_sha = hashlib.sha256(action.read_bytes()).hexdigest()
+    relative = body.relative_to(tmp_path).as_posix()
+    body_entry = {
+        "path": relative,
+        "content_length": body.stat().st_size,
+        "sha256": hashlib.sha256(body.read_bytes()).hexdigest(),
+    }
+    client = MagicMock()
+    monkeypatch.setattr(ecs.boto3, "client", lambda service: client)
+    monkeypatch.setattr(
+        ecs, "assert_daily_certification_lock", lambda connection: None,
+    )
+    previous = ecs._PublishedSnapshotPointer(
+        etag='"old"',
+        coverage_end=date(2026, 8, 9),
+        action_manifest_sha256="b" * 64,
+        bundle_prefix="old-bundle",
+        objects=(body_entry,),
+    )
+
+    ecs._publish_generated_snapshot(
+        "bronze",
+        tmp_path,
+        SimpleNamespace(
+            manifest_sha256=action_sha,
+            coverage_end=date(2026, 8, 10),
+        ),
+        previous,
+        certification_lock=object(),
+    )
+
+    client.copy_object.assert_called_once_with(
+        Bucket="bronze",
+        Key=(
+            f"{ecs._SNAPSHOT_PUBLISH_ROOT}/bundles/"
+            f"action-manifest-sha256={action_sha}/{relative}"
+        ),
+        CopySource={"Bucket": "bronze", "Key": f"old-bundle/{relative}"},
+        MetadataDirective="COPY",
+    )
 
 
 def test_generated_snapshot_refuses_coverage_regression_before_upload(

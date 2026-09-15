@@ -55,6 +55,7 @@ class _PublishedSnapshotPointer:
     coverage_end: date
     action_manifest_sha256: str
     bundle_prefix: str
+    objects: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,8 @@ def _download_changed(
     bucket: str,
     objects: list[_S3Object],
     root: Path,
+    *,
+    changed_sink: list[str] | None = None,
 ) -> tuple[int, int]:
     """Download only new or changed S3 objects into a persistent data root.
 
@@ -234,6 +237,8 @@ def _download_changed(
             reused += 1
             continue
         changed.append(item)
+        if changed_sink is not None:
+            changed_sink.append(item.key)
 
     def one(item: _S3Object) -> None:
         destination = root / item.key
@@ -585,6 +590,7 @@ def _restore_published_snapshot(
         coverage_end=coverage_end,
         action_manifest_sha256=action_sha,
         bundle_prefix=bundle_prefix,
+        objects=tuple(normalized),
     )
 
 
@@ -706,18 +712,29 @@ def _publish_component_checkpoint(
         if not _is_missing_object(exc):
             raise
         previous = None
-    for path in paths:
-        if path == manifest:
-            continue
+    def publish_leaf(path: Path) -> bool:
         relative = path.relative_to(root).as_posix()
         digest = _sha256_path(path)
+        length = path.stat().st_size
+        try:
+            existing = client.head_object(Bucket=bucket, Key=relative)
+        except ClientError as exc:
+            if not _is_missing_object(exc):
+                raise
+            existing = None
+        if (
+            existing is not None
+            and int(existing.get("ContentLength", -1)) == length
+            and (existing.get("Metadata") or {}).get("sha256") == digest
+        ):
+            return False
         try:
             with path.open("rb") as body:
                 client.put_object(
                     Bucket=bucket,
                     Key=relative,
                     Body=body,
-                    ContentLength=path.stat().st_size,
+                    ContentLength=length,
                     Metadata={"sha256": digest},
                     IfNoneMatch="*",
                 )
@@ -729,6 +746,14 @@ def _publish_component_checkpoint(
                 raise RuntimeError(
                     f"generated component object collision: {relative}"
                 ) from exc
+        return True
+
+    leaves = [path for path in paths if path != manifest]
+    uploaded = 0
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        futures = [executor.submit(publish_leaf, path) for path in leaves]
+        for future in as_completed(futures):
+            uploaded += int(future.result())
     assert_daily_certification_lock(certification_lock)
     conditions = (
         {"IfMatch": str(previous["ETag"])}
@@ -743,7 +768,8 @@ def _publish_component_checkpoint(
     )
     print(
         "[dart-silver-ecs] published retry checkpoint "
-        f"manifest={manifest_relative.as_posix()} objects={len(paths)}",
+        f"manifest={manifest_relative.as_posix()} "
+        f"uploaded={uploaded} reused={len(leaves) - uploaded}",
         flush=True,
     )
 
@@ -788,20 +814,44 @@ def _publish_generated_snapshot(
         f"action-manifest-sha256={action_sha}"
     )
 
-    def upload_one(path: Path) -> None:
+    previous_entries = {
+        str(entry["path"]): entry
+        for entry in getattr(previous, "objects", ())
+    }
+
+    def upload_one(path: Path) -> str:
         relative = path.relative_to(root).as_posix()
+        entry = entries_by_path[relative]
+        prior = previous_entries.get(relative)
+        if previous is not None and prior == entry:
+            # A new manifest generation used to re-upload every unchanged
+            # generated body from ECS. Copying the already authenticated
+            # immutable object inside S3 keeps the bundle contract while
+            # avoiding thousands of repeated data transfers.
+            client.copy_object(
+                Bucket=bucket,
+                Key=f"{bundle_prefix}/{relative}",
+                CopySource={
+                    "Bucket": bucket,
+                    "Key": f"{previous.bundle_prefix}/{relative}",
+                },
+                MetadataDirective="COPY",
+            )
+            return "copied"
         _put_immutable_snapshot_object(
             client,
             bucket,
             f"{bundle_prefix}/{relative}",
             path,
-            entries_by_path[relative],
+            entry,
         )
+        return "uploaded"
 
+    publication_counts = {"copied": 0, "uploaded": 0}
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = [executor.submit(upload_one, path) for path in paths]
         for future in as_completed(futures):
-            future.result()
+            publication_counts[future.result()] += 1
     pointer = {
         "schema_version": _SNAPSHOT_POINTER_SCHEMA,
         "complete": True,
@@ -839,7 +889,8 @@ def _publish_generated_snapshot(
         raise
     print(
         "[dart-silver-ecs] published immutable generated snapshot "
-        f"objects={len(paths)} manifest={action_sha}",
+        f"objects={len(paths)} copied={publication_counts['copied']} "
+        f"uploaded={publication_counts['uploaded']} manifest={action_sha}",
         flush=True,
     )
     return len(paths)
@@ -922,8 +973,29 @@ def prepare_total_return_snapshot(
         item for prefix in prefixes
         for item in _list_objects(s3, bucket, prefix)
     ]
-    count, reused = _download_changed(bucket, objects, root)
+    changed_object_keys: list[str] = []
+    count, reused = _download_changed(
+        bucket, objects, root, changed_sink=changed_object_keys,
+    )
     previous = _restore_published_snapshot(s3, bucket, root)
+    previous_manifest = root / dart_action_snapshot.MANIFEST_RELATIVE_PATH
+    if previous is not None and previous_manifest.is_file():
+        try:
+            previous_payload = json.loads(previous_manifest.read_bytes())
+            seeded = dart_action_snapshot.seed_body_hash_cache(
+                root,
+                previous_payload.get("objects") or [],
+                excluded_paths=changed_object_keys,
+            )
+            print(
+                "[dart-silver-ecs] reused authenticated body hashes "
+                f"count={seeded} changed={len(changed_object_keys)}",
+                flush=True,
+            )
+        except (OSError, json.JSONDecodeError):
+            # The normal snapshot verifier below remains fail-closed and will
+            # hash every body when no authenticated cache can be seeded.
+            pass
     price_keys = _cash_scale_price_keys(root)
     if price_keys:
         count += _download(bucket, price_keys, root)

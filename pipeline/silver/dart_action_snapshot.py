@@ -61,6 +61,10 @@ DEFAULT_COVERAGE_START = date(2015, 1, 1)
 MANIFEST_RELATIVE_PATH = Path(
     "corporate_actions/dart/action_snapshot_manifest.json"
 )
+HASH_CACHE_RELATIVE_PATH = Path(
+    ".teamalpha/dart_action_snapshot_hash_cache_v1.json"
+)
+_HASH_CACHE_SCHEMA = "dart_action_snapshot_hash_cache_v1"
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,95 @@ def _sha256(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_hash_cache(root: Path) -> dict[str, dict[str, object]]:
+    path = root / HASH_CACHE_RELATIVE_PATH
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = payload.get("entries")
+    if payload.get("schema_version") != _HASH_CACHE_SCHEMA or not isinstance(
+        entries, dict,
+    ):
+        return {}
+    return entries
+
+
+def _write_hash_cache(root: Path, entries: dict[str, dict[str, object]]) -> None:
+    path = root / HASH_CACHE_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": _HASH_CACHE_SCHEMA,
+        "entries": entries,
+    }
+    rendered = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def seed_body_hash_cache(
+    base: str | Path,
+    entries: Iterable[dict[str, object]],
+    *,
+    excluded_paths: Iterable[str] = (),
+) -> int:
+    """Seed hashes from an already authenticated snapshot manifest.
+
+    The caller must authenticate the manifest itself (the published snapshot
+    pointer does this by SHA-256). Local size and mtime are bound here so any
+    subsequent local replacement falls back to hashing the body again.
+    """
+    root = Path(base).expanduser().resolve()
+    excluded = set(excluded_paths)
+    cache = _read_hash_cache(root)
+    seeded = 0
+    for entry in entries:
+        relative = str(entry.get("path") or "")
+        candidate = Path(relative)
+        digest = str(entry.get("sha256") or "")
+        try:
+            expected_size = int(entry.get("content_length", -1))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not relative
+            or relative in excluded
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            continue
+        path = root / candidate
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if not path.is_file() or stat.st_size != expected_size:
+            continue
+        cache[relative] = {
+            "content_length": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest,
+        }
+        seeded += 1
+    _write_hash_cache(root, cache)
+    return seeded
 
 
 def _listing_snapshot(root: Path) -> dict[str, object]:
@@ -744,14 +837,43 @@ def _evidence_paths(
 
 
 def _body_entries(root: Path, paths: Sequence[Path]) -> list[dict]:
-    return [
-        {
-            "path": path.relative_to(root).as_posix(),
-            "content_length": path.stat().st_size,
-            "sha256": _sha256(path),
-        }
-        for path in paths
-    ]
+    cache = _read_hash_cache(root)
+    entries: list[dict] = []
+    dirty = False
+    live_paths: set[str] = set()
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        live_paths.add(relative)
+        stat = path.stat()
+        cached = cache.get(relative)
+        if (
+            isinstance(cached, dict)
+            and cached.get("content_length") == stat.st_size
+            and cached.get("mtime_ns") == stat.st_mtime_ns
+            and re.fullmatch(r"[0-9a-f]{64}", str(cached.get("sha256") or ""))
+        ):
+            digest = str(cached["sha256"])
+        else:
+            digest = _sha256(path)
+            cache[relative] = {
+                "content_length": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "sha256": digest,
+            }
+            dirty = True
+        entries.append({
+            "path": relative,
+            "content_length": stat.st_size,
+            "sha256": digest,
+        })
+    stale = set(cache).difference(live_paths)
+    if stale:
+        for relative in stale:
+            cache.pop(relative, None)
+        dirty = True
+    if dirty:
+        _write_hash_cache(root, cache)
+    return entries
 
 
 def _body_digest(entries: Sequence[dict]) -> str:

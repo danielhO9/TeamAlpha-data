@@ -112,6 +112,42 @@ def test_snapshot_manifest_hashes_every_body_and_verifies_continuous_coverage(
     assert verified.body_count == len(payload["objects"])
 
 
+def test_snapshot_reuses_authenticated_hash_until_local_file_changes(
+    tmp_path, monkeypatch,
+):
+    _complete_interval(tmp_path, "20150101", "20151231")
+    built = build_snapshot_manifest(
+        str(tmp_path), coverage_end=date(2015, 12, 31),
+    )
+    payload = json.loads((tmp_path / MANIFEST_RELATIVE_PATH).read_text())
+
+    snapshot_module.seed_body_hash_cache(tmp_path, payload["objects"])
+    original = snapshot_module._sha256
+    hashes: list[str] = []
+
+    def observed(path):
+        hashes.append(path.relative_to(tmp_path).as_posix())
+        return original(path)
+
+    monkeypatch.setattr(snapshot_module, "_sha256", observed)
+    assert verify_snapshot_manifest(
+        str(tmp_path), required_end=date(2015, 12, 31),
+    ) == built
+    assert hashes == []
+
+    body_entry = next(
+        entry for entry in payload["objects"]
+        if entry["path"].endswith("disclosures_v3.json")
+    )
+    body = tmp_path / body_entry["path"]
+    body.write_bytes(body.read_bytes() + b"\n")
+    with pytest.raises(RuntimeError, match="SHA/content length mismatch"):
+        verify_snapshot_manifest(
+            str(tmp_path), required_end=date(2015, 12, 31),
+        )
+    assert body.relative_to(tmp_path).as_posix() in hashes
+
+
 def test_precoverage_dependency_interval_does_not_expand_declared_coverage(
     tmp_path,
 ):
