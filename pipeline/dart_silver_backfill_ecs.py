@@ -624,9 +624,42 @@ def restore_published_total_return_snapshot(
             f"published={pointer.coverage_end.isoformat()} "
             f"required={coverage_end.isoformat()}"
         )
+    # Retry-only repair deliberately skips the S3 LIST/download preflight.
+    # Seed the body-hash cache from the SHA-authenticated published action
+    # manifest, but only for generated bundle objects verified above or core
+    # Bronze files still bound by the persistent S3 ETag/size cache. This
+    # avoids re-reading the complete 2015+ corpus while a changed/missing local
+    # body still falls back to the normal fail-closed SHA verification.
+    action_manifest = root / dart_action_snapshot.MANIFEST_RELATIVE_PATH
+    try:
+        action_payload = json.loads(action_manifest.read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "restored DART action manifest is invalid"
+        ) from exc
+    s3_cache = _read_cache_index(root)
+    generated = {str(entry["path"]) for entry in pointer.objects}
+    trusted_entries: list[dict[str, object]] = []
+    for entry in action_payload.get("objects") or []:
+        if not isinstance(entry, dict):
+            continue
+        relative = str(entry.get("path") or "")
+        cached = s3_cache.get(relative)
+        try:
+            declared_size = int(entry.get("content_length", -1))
+        except (TypeError, ValueError):
+            continue
+        if relative in generated or (
+            isinstance(cached, dict)
+            and cached.get("size") == declared_size
+        ):
+            trusted_entries.append(entry)
+    seeded = dart_action_snapshot.seed_body_hash_cache(
+        root, trusted_entries,
+    )
     print(
         "[dart-silver-ecs] retry restored published action snapshot "
-        f"coverage_end={coverage_end.isoformat()}",
+        f"coverage_end={coverage_end.isoformat()} cached_hashes={seeded}",
         flush=True,
     )
 
