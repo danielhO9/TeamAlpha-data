@@ -425,6 +425,23 @@ def test_largest_scanned_lineage_drift_remains_stable_without_evidence():
     assert events.iloc[0]["scale_change_detected"] is False
 
 
+def test_actual_018470_rescaled_lineage_remains_stable_without_evidence():
+    prices = _prices([
+        ("018470", date(2016, 12, 27), 1640.0, 7827.2725),
+        ("018470", date(2016, 12, 28), 1625.0, 7755.6820),
+    ])
+    dividends = pd.DataFrame([{
+        "identifier": "018470",
+        "cash_amount": 15.0,
+        "resolved_ex_date": date(2016, 12, 28),
+    }])
+
+    _, events = apply_dividends_to_prices(prices, dividends)
+
+    assert events.iloc[0]["application_status"] == "applied"
+    assert events.iloc[0]["scale_change_detected"] is False
+
+
 def test_first_listing_day_cash_event_is_explicit_and_consumes_no_evidence():
     prices = _prices([
         ("152330", date(2015, 12, 29), 100.0, 100.0),

@@ -42,12 +42,13 @@ REVIEWED_ADDITIVE_ROOT_SETS = frozenset({
     frozenset({"20260213901085", "20260213901121"}),  # 079000
 })
 
-# A complete scan of the certified 2015-2026 KRX history found that repeated
-# source/persistence rounding can move an otherwise stable adjusted-price
-# scale by at most 4.53e-8 relatively.  Keep the admission ceiling just above
-# that observed lineage bound and forty times below the 2 ppm regression that
-# must remain a real scale change.
-MAX_STABLE_SCALE_LINEAGE_DRIFT = 5e-8
+# Certified 2015-2026 KRX history contains repeated four-decimal source and
+# persistence rescaling. The latest DART action closure exposed a 5.248e-8
+# stable-lineage case (018470, 2016-12-28) whose raw KRX comparison basis is
+# exactly unchanged. Keep the ceiling just above that observed bound while
+# remaining more than thirty times below the 2 ppm regression that must still
+# be treated as a real scale change.
+MAX_STABLE_SCALE_LINEAGE_DRIFT = 6e-8
 
 
 def _column(frame: pd.DataFrame, *names: str) -> str | None:
