@@ -2288,7 +2288,46 @@ def _incremental_baseline(conn) -> IncrementalBaseline | None:
         )
         row = cur.fetchone()
     if not row:
-        return None
+        # A failed rebuild marks the mutable contract BUILDING and older
+        # deployments replaced its metadata with only a reason string. The
+        # immutable certified price/audit generations still retain the exact
+        # baseline, so recover it instead of silently falling back to a full
+        # universe rebuild.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH latest AS (
+                    SELECT run_id
+                    FROM dq_run
+                    WHERE mode='krx_total_return_rebuild'
+                      AND status='CERTIFIED'
+                    ORDER BY finished_at DESC NULLS LAST, started_at DESC
+                    LIMIT 1
+                ), lineage AS (
+                    SELECT DISTINCT
+                           r.scale_evidence_action_snapshot_run_id AS run_id
+                    FROM dividend_event_resolution r
+                    JOIN latest q ON q.run_id=r.quality_run_id
+                    WHERE r.scale_evidence_action_snapshot_run_id IS NOT NULL
+                )
+                SELECT max(p.trade_date), min(l.run_id::text)::uuid,
+                       max(q.run_id::text)::uuid,
+                       count(DISTINCT l.run_id)
+                FROM latest q
+                JOIN price_daily p
+                  ON p.total_return_quality_run_id=q.run_id
+                CROSS JOIN lineage l
+                """
+            )
+            recovered = cur.fetchone()
+        if not recovered or int(recovered[3] or 0) != 1:
+            return None
+        row = recovered[:3]
+        print(
+            "[total-return] recovered incremental baseline from immutable "
+            f"audit lineage run_id={row[2]}",
+            flush=True,
+        )
     try:
         return IncrementalBaseline(
             coverage_end=row[0],
