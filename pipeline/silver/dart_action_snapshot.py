@@ -15,6 +15,7 @@ import os
 import re
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -145,15 +146,14 @@ def seed_body_hash_cache(
     root = Path(base).expanduser().resolve()
     excluded = set(excluded_paths)
     cache = _read_hash_cache(root)
-    seeded = 0
-    for entry in entries:
+    def seed_one(entry: dict[str, object]):
         relative = str(entry.get("path") or "")
         candidate = Path(relative)
         digest = str(entry.get("sha256") or "")
         try:
             expected_size = int(entry.get("content_length", -1))
         except (TypeError, ValueError):
-            continue
+            return None
         if (
             not relative
             or relative in excluded
@@ -161,20 +161,29 @@ def seed_body_hash_cache(
             or ".." in candidate.parts
             or not re.fullmatch(r"[0-9a-f]{64}", digest)
         ):
-            continue
+            return None
         path = root / candidate
         try:
             stat = path.stat()
         except OSError:
-            continue
+            return None
         if not path.is_file() or stat.st_size != expected_size:
-            continue
-        cache[relative] = {
-            "content_length": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "sha256": digest,
-        }
-        seeded += 1
+            return None
+        return relative, {
+                "content_length": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "sha256": digest,
+            }
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        seeded_entries = executor.map(seed_one, entries, chunksize=256)
+        seeded = 0
+        for result in seeded_entries:
+            if result is None:
+                continue
+            relative, cache_entry = result
+            cache[relative] = cache_entry
+            seeded += 1
     _write_hash_cache(root, cache)
     return seeded
 
@@ -838,12 +847,9 @@ def _evidence_paths(
 
 def _body_entries(root: Path, paths: Sequence[Path]) -> list[dict]:
     cache = _read_hash_cache(root)
-    entries: list[dict] = []
-    dirty = False
-    live_paths: set[str] = set()
-    for path in paths:
+
+    def body_entry(path: Path) -> tuple[dict, dict[str, object] | None]:
         relative = path.relative_to(root).as_posix()
-        live_paths.add(relative)
         stat = path.stat()
         cached = cache.get(relative)
         if (
@@ -853,19 +859,33 @@ def _body_entries(root: Path, paths: Sequence[Path]) -> list[dict]:
             and re.fullmatch(r"[0-9a-f]{64}", str(cached.get("sha256") or ""))
         ):
             digest = str(cached["sha256"])
+            updated_cache = None
         else:
             digest = _sha256(path)
-            cache[relative] = {
+            updated_cache = {
                 "content_length": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
                 "sha256": digest,
             }
-            dirty = True
-        entries.append({
+        return ({
             "path": relative,
             "content_length": stat.st_size,
             "sha256": digest,
-        })
+        }, updated_cache)
+
+    entries: list[dict] = []
+    dirty = False
+    live_paths: set[str] = set()
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        for entry, updated_cache in executor.map(
+            body_entry, paths, chunksize=256,
+        ):
+            relative = str(entry["path"])
+            live_paths.add(relative)
+            entries.append(entry)
+            if updated_cache is not None:
+                cache[relative] = updated_cache
+                dirty = True
     stale = set(cache).difference(live_paths)
     if stale:
         for relative in stale:
