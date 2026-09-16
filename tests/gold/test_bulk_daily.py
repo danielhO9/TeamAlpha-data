@@ -39,3 +39,4 @@ def test_daily_panel_does_not_survive_transaction(monkeypatch):
     executed = [call.args[0] for call in cursor.execute.call_args_list]
     assert any("_gold_price_base ON COMMIT DROP" in sql for sql in executed)
     assert not any("PRESERVE ROWS" in sql for sql in executed)
+    assert not any("SET LOCAL temp_buffers" in sql for sql in executed)

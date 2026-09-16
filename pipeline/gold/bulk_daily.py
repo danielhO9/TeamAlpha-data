@@ -214,7 +214,9 @@ def _statements() -> list[str]:
 def _configure_session(cur) -> None:
     cur.execute("SET LOCAL work_mem='256MB'")
     cur.execute("SET LOCAL maintenance_work_mem='512MB'")
-    cur.execute("SET LOCAL temp_buffers='128MB'")
+    # temp_buffers cannot be changed after this session has used any temp
+    # table (Silver and individual factors already do). Keep the connection
+    # default; changing it here aborts the whole bulk transaction.
 
 
 def _create_factor_ids(cur, factor_rows, *, preserve: bool = False) -> None:
