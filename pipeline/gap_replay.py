@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from pipeline import daily_full, dart_silver_backfill_ecs
 from pipeline.silver_quality import freshness
@@ -23,6 +23,38 @@ def _weekdays(from_day: str, to_day: str) -> list[str]:
     if not days:
         raise ValueError("gap replay range contains no weekdays")
     return days
+
+
+def _validate_building_resume(report: dict, last_price_day: date, first_day: date) -> None:
+    """A deferred return horizon may lag raw prices, never lead them.
+
+    Silver publication demotes the label to BUILDING without advancing its
+    certified coverage_end. Resume from the next raw-price partition instead
+    of requiring that not-yet-rebuilt label to already cover it.
+    """
+    try:
+        start = date.fromisoformat(report["coverage_start"])
+        end = date.fromisoformat(report["coverage_end"])
+        valid = (
+            report.get("status") == "BUILDING"
+            and start <= end <= last_price_day < first_day
+            and report.get("first_certified_trade") == start.isoformat()
+            and report.get("last_certified_trade") == last_price_day.isoformat()
+            and report.get("methodology_version") == freshness.KRX_TOTAL_RETURN_METHODOLOGY
+            and report.get("contract_release") == freshness.CONTRACT_RELEASE
+            and report.get("dq_status") == "CERTIFIED"
+            and report.get("dq_mode") in {"daily", "krx_total_return_rebuild"}
+            and bool(report.get("quality_run_id"))
+        )
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if valid:
+        valid = len(daily_full._pending_krx_sessions(last_price_day, first_day)) <= 1
+    if not valid:
+        raise RuntimeError(
+            "gap replay cannot safely resume the existing BUILDING "
+            f"contract: report={report} first={first_day}"
+        )
 
 
 def run(
@@ -58,15 +90,7 @@ def run(
                 )
             )
             first_replay_day = datetime.strptime(days[0], "%Y%m%d").date()
-            if (
-                report.get("status") != "BUILDING"
-                or report.get("coverage_end") != last_price_day.isoformat()
-                or first_replay_day <= last_price_day
-            ):
-                raise RuntimeError(
-                    "gap replay cannot safely resume the existing BUILDING "
-                    f"contract: report={report} first={first_replay_day}"
-                )
+            _validate_building_resume(report, last_price_day, first_replay_day)
             print(
                 "[gap-replay] resuming fenced BUILDING contract "
                 f"coverage_end={last_price_day.isoformat()}",

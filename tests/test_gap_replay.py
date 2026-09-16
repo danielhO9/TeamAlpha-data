@@ -114,7 +114,19 @@ def test_gap_replay_refuses_unhealthy_entry_contract(monkeypatch):
     assert released == [lock]
 
 
-def test_gap_replay_resumes_matching_building_contract(monkeypatch):
+def _building_report(end="2026-08-11"):
+    return {
+        "status": "BUILDING", "coverage_start": "2015-01-02",
+        "coverage_end": end, "first_certified_trade": "2015-01-02",
+        "last_certified_trade": "2026-08-11",
+        "methodology_version": gap_replay.freshness.KRX_TOTAL_RETURN_METHODOLOGY,
+        "contract_release": gap_replay.freshness.CONTRACT_RELEASE,
+        "dq_status": "CERTIFIED", "dq_mode": "daily", "quality_run_id": "run-id",
+    }
+
+
+@pytest.mark.parametrize("end", ["2026-08-11", "2026-08-10"])
+def test_gap_replay_resumes_matching_building_contract(monkeypatch, end):
     lock = object()
     calls: list[tuple] = []
     monkeypatch.setattr(
@@ -140,7 +152,7 @@ def test_gap_replay_resumes_matching_building_contract(monkeypatch):
     monkeypatch.setattr(
         gap_replay.freshness,
         "total_return_contract_report",
-        lambda conn: {"status": "BUILDING", "coverage_end": "2026-08-11"},
+        lambda conn: _building_report(end),
     )
     monkeypatch.setattr(
         gap_replay.daily_full,
@@ -154,3 +166,30 @@ def test_gap_replay_resumes_matching_building_contract(monkeypatch):
 
     assert calls[0][0] == "20260812"
     assert calls[-1] == ("release", lock)
+
+
+@pytest.mark.parametrize("changes", [
+    {"coverage_end": "2026-08-12"}, {"coverage_end": None},
+    {"coverage_end": "2014-01-01"}, {"status": "FAILED"},
+    {"last_certified_trade": "2026-08-10"},
+    {"first_certified_trade": "2016-01-01"},
+    {"methodology_version": "old"}, {"contract_release": "old"},
+    {"dq_status": "FAILED"}, {"dq_mode": "fmp_daily"},
+    {"quality_run_id": None},
+])
+def test_building_resume_rejects_unverified_or_future_coverage(changes):
+    with pytest.raises(RuntimeError, match="cannot safely resume"):
+        gap_replay._validate_building_resume(
+            {**_building_report(), **changes}, date(2026, 8, 11), date(2026, 8, 12),
+        )
+
+
+@pytest.mark.parametrize("first", [date(2026, 8, 11), date(2026, 8, 13)])
+def test_building_resume_rejects_reprocessing_or_skipping_raw_sessions(first):
+    with pytest.raises(RuntimeError, match="cannot safely resume"):
+        gap_replay._validate_building_resume(_building_report(), date(2026, 8, 11), first)
+
+
+def test_building_resume_accepts_deferred_september_production_horizons():
+    report = {**_building_report("2026-09-11"), "last_certified_trade": "2026-09-14"}
+    gap_replay._validate_building_resume(report, date(2026, 9, 14), date(2026, 9, 15))
