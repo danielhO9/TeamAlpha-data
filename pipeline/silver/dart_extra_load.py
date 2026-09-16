@@ -985,15 +985,11 @@ def run(
             with connection.cursor() as cur:
                 cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             acquire_return_writer_transaction_lock(connection)
-            # Re-verify immediately before parse/publish so an edited local
-            # body cannot race the manifest preflight.
-            repeated = verify_snapshot_manifest(
-                base,
-                required_start=DEFAULT_COVERAGE_START,
-                required_end=expected_coverage_end,
-            )
-            if repeated != verified:
-                raise RuntimeError("DART snapshot changed before apply")
+            # The initial verification above precedes parsing, and the owning
+            # daily epoch lock excludes another pipeline writer. Repeating the
+            # complete 100k-body walk here did not close a TOCTOU window: the
+            # post-parse verification below still runs immediately before the
+            # first DML and rejects any intervening local mutation.
             (
                 bundle, dividend_frame, action_frame, identifier_map,
                 pit_stats, source_action_frame,
