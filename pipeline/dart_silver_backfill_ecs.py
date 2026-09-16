@@ -1128,30 +1128,17 @@ def preview_total_return_actions(
     without strengthening the fail-closed contract.
     """
     root = (root or DATA_ROOT).resolve()
-    verified = dart_action_snapshot.verify_snapshot_manifest(
-        str(root),
-        required_start=dart_action_snapshot.DEFAULT_COVERAGE_START,
-        required_end=coverage_end,
-    )
-    scale_evidence = (
-        cash_adjustment_scale_evidence.verify_source_evidence_manifest(
-            str(root),
-            required_start=verified.coverage_start,
-            required_end=verified.coverage_end,
-        )
-    )
-    if verified.cash_adjustment_scale_source_evidence != scale_evidence.metadata:
-        raise RuntimeError("action snapshot/cash-scale manifest metadata mismatch")
-    # Prove the DB session and the certified price horizon are still readable;
-    # the atomic apply owns every expensive action transformation that follows.
+    # Snapshot preparation already verified the immutable manifests, and the
+    # atomic apply immediately re-verifies them before parsing and before DML.
+    # A third 100k-path EFS walk here is therefore duplicate evidence. Prove
+    # only that the owning DB session and certified price horizon are stable.
     if conn is not None:
         assert_daily_certification_lock(conn)
         if certified_krx_price_coverage_end(conn=conn) != coverage_end:
             raise RuntimeError("certified KRX price coverage changed before apply")
     print(
         "[dart-silver-ecs] lightweight action preflight complete "
-        f"coverage_end={coverage_end.isoformat()} "
-        f"manifest={verified.manifest_sha256}",
+        f"coverage_end={coverage_end.isoformat()}",
         flush=True,
     )
 

@@ -147,25 +147,16 @@ def test_action_preview_is_manifest_only_not_duplicate_full_parse(
 ):
     coverage_end = date(2026, 8, 10)
     lock = object()
-    scale_metadata = {"contract": "scale"}
-    verified = SimpleNamespace(
-        coverage_start=date(2015, 1, 1),
-        coverage_end=coverage_end,
-        manifest_sha256="a" * 64,
-        cash_adjustment_scale_source_evidence=scale_metadata,
-    )
     calls = []
     monkeypatch.setattr(
         ecs.dart_action_snapshot,
         "verify_snapshot_manifest",
-        lambda *args, **kwargs: calls.append(("snapshot", args, kwargs))
-        or verified,
+        lambda *args, **kwargs: pytest.fail("duplicate manifest verify reached"),
     )
     monkeypatch.setattr(
         ecs.cash_adjustment_scale_evidence,
         "verify_source_evidence_manifest",
-        lambda *args, **kwargs: calls.append(("scale", args, kwargs))
-        or SimpleNamespace(metadata=scale_metadata),
+        lambda *args, **kwargs: pytest.fail("duplicate scale verify reached"),
     )
     monkeypatch.setattr(
         ecs.dart_extra_load,
@@ -185,7 +176,7 @@ def test_action_preview_is_manifest_only_not_duplicate_full_parse(
         coverage_end, root=tmp_path, conn=lock,
     )
 
-    assert [call[0] for call in calls] == ["snapshot", "scale", "lock"]
+    assert [call[0] for call in calls] == ["lock"]
 
 
 def test_retry_restore_requires_exact_published_coverage(monkeypatch, tmp_path):
