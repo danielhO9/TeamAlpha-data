@@ -234,12 +234,13 @@ def test_runner_rejects_a_different_research_definition():
         raise AssertionError("definition mismatch must fail")
 
 
-def test_runner_binds_exact_daily_range_and_commits(monkeypatch):
-    spec = MANIFEST["trading_turnover_20d"]
+@pytest.mark.parametrize("factor_key", ["trading_turnover_20d", "turnover_volatility_12m"])
+def test_runner_binds_exact_daily_range_and_commits(monkeypatch, factor_key):
+    spec = MANIFEST[factor_key]
     path = ROOT / spec["sql"]
     metadata = {
         "factor_id": 42,
-        "factor_key": "trading_turnover_20d",
+        "factor_key": factor_key,
         "version": spec["version"],
         "status": "APPROVED",
         "implementation_uri": f"repo://TeamAlpha-data/{spec['sql']}",
@@ -259,7 +260,7 @@ def test_runner_binds_exact_daily_range_and_commits(monkeypatch):
 
     affected = run.run_factor(
         conn,
-        factor_key="trading_turnover_20d",
+        factor_key=factor_key,
         start_date="2026-09-01",
         end_date="2026-09-10",
         apply=True,

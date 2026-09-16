@@ -1134,8 +1134,11 @@ def preview_total_return_actions(
     # only that the owning DB session and certified price horizon are stable.
     if conn is not None:
         assert_daily_certification_lock(conn)
-        if certified_krx_price_coverage_end(conn=conn) != coverage_end:
-            raise RuntimeError("certified KRX price coverage changed before apply")
+        # Daily preflight happens BEFORE the new raw-price partition is
+        # published. Yesterday's certified horizon is expected here; only a
+        # horizon ahead of the evidence snapshot is unsafe.
+        if certified_krx_price_coverage_end(conn=conn) > coverage_end:
+            raise RuntimeError("certified KRX price coverage exceeds action snapshot")
     print(
         "[dart-silver-ecs] lightweight action preflight complete "
         f"coverage_end={coverage_end.isoformat()}",

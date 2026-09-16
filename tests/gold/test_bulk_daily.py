@@ -1,4 +1,5 @@
 from pipeline.gold import bulk_daily
+from unittest.mock import MagicMock
 
 
 def test_bulk_sql_covers_every_legacy_factor_once():
@@ -22,3 +23,19 @@ def test_daily_definition_hash_changes_with_implementation():
     second = bulk_daily._daily_definition_hash("old", "sql-b")
     assert len(first) == 16
     assert first != second
+
+
+def test_daily_panel_does_not_survive_transaction(monkeypatch):
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.rowcount = 1
+    monkeypatch.setattr(bulk_daily, "_load_factor_ids", lambda *a, **kw: [])
+    monkeypatch.setattr(bulk_daily, "_create_factor_ids", lambda *a: None)
+    monkeypatch.setattr(bulk_daily, "_validate_stage", lambda *a: 1)
+    monkeypatch.setattr(bulk_daily, "_statements", lambda: [
+        "CREATE TEMP TABLE _gold_price_base ON COMMIT PRESERVE ROWS AS SELECT 1"
+    ])
+    bulk_daily.run_bulk(conn, start_date="2026-09-14", end_date="2026-09-14", apply=True)
+    executed = [call.args[0] for call in cursor.execute.call_args_list]
+    assert any("_gold_price_base ON COMMIT DROP" in sql for sql in executed)
+    assert not any("PRESERVE ROWS" in sql for sql in executed)

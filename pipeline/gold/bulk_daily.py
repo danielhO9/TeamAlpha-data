@@ -282,7 +282,13 @@ def run_bulk(
                     f"range={start}..{end}",
                     flush=True,
                 )
-                cur.execute(statement, params)
+                # Shared backfill preserves the panel across chunks. Daily
+                # invocations do not: gap replay uses the same connection on
+                # consecutive days, so stale temp tables must not survive.
+                daily_statement = statement.replace(
+                    "ON COMMIT PRESERVE ROWS", "ON COMMIT DROP"
+                )
+                cur.execute(daily_statement, params)
                 print(
                     f"[gold-bulk] stage={number}/{len(statements)} done "
                     f"seconds={time.monotonic() - stage_started:.1f}",

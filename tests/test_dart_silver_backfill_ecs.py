@@ -142,8 +142,9 @@ def test_prepare_snapshot_downloads_refreshes_builds_then_publishes(
     ]
 
 
+@pytest.mark.parametrize("price_day", [date(2026, 8, 9), date(2026, 8, 10)])
 def test_action_preview_is_manifest_only_not_duplicate_full_parse(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, price_day,
 ):
     coverage_end = date(2026, 8, 10)
     lock = object()
@@ -169,7 +170,7 @@ def test_action_preview_is_manifest_only_not_duplicate_full_parse(
     )
     monkeypatch.setattr(
         ecs, "certified_krx_price_coverage_end",
-        lambda **kwargs: coverage_end,
+        lambda **kwargs: price_day,
     )
 
     ecs.preview_total_return_actions(
@@ -177,6 +178,18 @@ def test_action_preview_is_manifest_only_not_duplicate_full_parse(
     )
 
     assert [call[0] for call in calls] == ["lock"]
+
+
+def test_action_preview_rejects_prices_ahead_of_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(ecs, "assert_daily_certification_lock", lambda conn: None)
+    monkeypatch.setattr(
+        ecs, "certified_krx_price_coverage_end",
+        lambda **kwargs: date(2026, 8, 11),
+    )
+    with pytest.raises(RuntimeError, match="exceeds action snapshot"):
+        ecs.preview_total_return_actions(
+            date(2026, 8, 10), root=tmp_path, conn=object(),
+        )
 
 
 def test_retry_restore_requires_exact_published_coverage(monkeypatch, tmp_path):

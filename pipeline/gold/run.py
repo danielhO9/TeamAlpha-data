@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import re
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -289,6 +290,11 @@ def run_approved_daily(
             legacy_ready = cur.fetchone()[0]
     results: dict[str, int] = {}
     for factor_key in approved:
+        started = time.monotonic()
+        print(
+            f"[gold] factor={factor_key} date={target.isoformat()} stage=start",
+            flush=True,
+        )
         affected = run_factor(
             conn,
             factor_key=factor_key,
@@ -300,7 +306,7 @@ def run_approved_daily(
         mode = "APPLY" if apply else "DRY-RUN/ROLLBACK"
         print(
             f"[gold] factor={factor_key} date={target.isoformat()} "
-            f"rows={affected:,} mode={mode}",
+            f"rows={affected:,} mode={mode} elapsed_s={time.monotonic()-started:.1f}",
             flush=True,
         )
     # Legacy definitions share the same daily price and PIT-financial panel.
