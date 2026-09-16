@@ -186,6 +186,9 @@ def run_factor(
             metadata = _load_factor(conn, factor_key, int(spec["version"]))
             validate_contract(metadata, spec, sql_path)
             with conn.cursor() as cur:
+                # A stopped ECS client must not leave a CPU-bound query
+                # running with the certification session lock still held.
+                cur.execute("SET LOCAL client_connection_check_interval='5s'")
                 params = {
                     "factor_id": metadata["factor_id"],
                     "start_date": start,

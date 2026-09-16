@@ -212,6 +212,7 @@ def _statements() -> list[str]:
 
 
 def _configure_session(cur) -> None:
+    cur.execute("SET LOCAL client_connection_check_interval='5s'")
     cur.execute("SET LOCAL work_mem='256MB'")
     cur.execute("SET LOCAL maintenance_work_mem='512MB'")
     # temp_buffers cannot be changed after this session has used any temp
