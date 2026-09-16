@@ -1325,16 +1325,21 @@ def _source_price_coverage(conn) -> tuple[date, date]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT min(p.trade_date), max(p.trade_date)
-            FROM price_daily p
-            JOIN asset a ON a.asset_id=p.asset_id
-            JOIN dq_run q ON q.run_id=p.quality_run_id
-            WHERE p.source='KRX'
-              AND a.asset_type='stock'
-              AND a.instrument_type='common_stock'
-              AND a.exchange='KRX'
-              AND p.market IN ('KOSPI','KOSDAQ')
-              AND q.status='CERTIFIED'
+            WITH eligible AS NOT MATERIALIZED (
+                SELECT p.trade_date
+                FROM price_daily p
+                JOIN asset a ON a.asset_id=p.asset_id
+                JOIN dq_run q ON q.run_id=p.quality_run_id
+                WHERE p.source='KRX'
+                  AND a.asset_type='stock'
+                  AND a.instrument_type='common_stock'
+                  AND a.exchange='KRX'
+                  AND p.market IN ('KOSPI','KOSDAQ')
+                  AND q.status='CERTIFIED'
+            )
+            SELECT
+                (SELECT trade_date FROM eligible ORDER BY trade_date ASC LIMIT 1),
+                (SELECT trade_date FROM eligible ORDER BY trade_date DESC LIMIT 1)
             """
         )
         coverage_start, coverage_end = cur.fetchone()

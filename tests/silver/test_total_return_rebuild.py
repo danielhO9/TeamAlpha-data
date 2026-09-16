@@ -1,6 +1,7 @@
 from datetime import date
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -10,6 +11,31 @@ import pipeline.silver.dart_extra_load as dart_extra_load
 from pipeline.silver.cash_adjustment_scale_evidence import (
     BoundScaleSourceEvidence,
 )
+
+
+@pytest.mark.parametrize("bounds", [
+    (date(2010, 1, 4), date(2026, 9, 14)), (None, None),
+])
+def test_source_coverage_probes_endpoints_without_full_history_aggregate(bounds):
+    conn = MagicMock()
+    cursor = conn.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = bounds
+    if bounds[0] is None:
+        with pytest.raises(RuntimeError, match="source price is empty"):
+            rebuild._source_price_coverage(conn)
+    else:
+        assert rebuild._source_price_coverage(conn) == bounds
+    sql = cursor.execute.call_args.args[0]
+    assert "AS NOT MATERIALIZED" in sql
+    assert "ORDER BY trade_date ASC LIMIT 1" in sql
+    assert "ORDER BY trade_date DESC LIMIT 1" in sql
+    assert "min(p.trade_date)" not in sql
+    for predicate in (
+        "p.source='KRX'", "a.asset_type='stock'",
+        "a.instrument_type='common_stock'", "a.exchange='KRX'",
+        "p.market IN ('KOSPI','KOSDAQ')", "q.status='CERTIFIED'",
+    ):
+        assert predicate in sql
 from pipeline.silver.total_return_rebuild import (
     BatchRebuild,
     LocalActionSnapshot,
