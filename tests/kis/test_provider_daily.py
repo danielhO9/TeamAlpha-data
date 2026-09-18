@@ -120,3 +120,13 @@ def test_stock_info_accepts_only_exact_or_documented_product_identity():
             assert client.stock_info('006380')[0]['pdno']==value
     with patch.object(client,'_capture',return_value=({'output':{'pdno':'00000A005930'}},{})):
         with pytest.raises(ValueError,match='identity'):client.stock_info('006380')
+
+
+def test_daily_reference_index_preserves_requested_days_and_drops_old_history():
+    rows=[dict(asset_id=1,start='2025-03-04',end='2026-09-10',status='INELIGIBLE',evidence='old'),
+          dict(asset_id=1,start='2026-09-11',end='2026-09-17',status='ELIGIBLE',evidence='new'),
+          dict(asset_id=2,start='2025-03-04',end='2026-09-17',status='INELIGIBLE',evidence='span')]
+    lower=date(2026,9,11);kept=daily.reference_window(rows,lower)
+    assert len(kept)==2 and kept[1]['start']=='2025-03-04'
+    for aid in [1,2]:
+        assert k.nxt_dates({'nxt_intervals':rows},aid,[lower,D])==k.nxt_dates({'nxt_intervals':kept},aid,[lower,D])

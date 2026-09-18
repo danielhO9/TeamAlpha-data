@@ -148,6 +148,11 @@ def refresh_listing(conn, periods, ids, sessions, through, target, client, evide
     return close_periods(periods, events, through + timedelta(days=1), target) if events else periods
 
 
+def reference_window(intervals, start):
+    """Bound the daily index; immutable prior states retain the complete history."""
+    return [r for r in intervals if date.fromisoformat(r['end']) >= start]
+
+
 def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=None, client=None):
     """Refresh public references. The shared daily writer lock must be held by caller."""
     from pipeline.kis_flows import read_json
@@ -162,6 +167,7 @@ def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=N
     if through > target: raise ValueError('reference checkpoint newer than requested daily target')
     if target - through > timedelta(days=40): raise ValueError('reference gap exceeds bounded daily recovery; run reference catch-up')
     session = session or requests.Session()
+    parent_uri = _freeze(root, 'states', state)
     state = copy.deepcopy(state)
     evidence = []
     if target > through:
@@ -180,6 +186,7 @@ def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=N
             state['nxt_event_active'], intervals = nxt_day(day, body, changes, state['nxt_event_active'],
                 state['asset_tickers'], state['permanent_exclusions'], uri)
             state['nxt_intervals'].extend(intervals)
+    state['nxt_intervals'] = reference_window(state['nxt_intervals'], min(sessions))
     periods = refresh_listing(conn, state['periods'], manifest['asset_ids'], sessions, through, target, client, evidence)
     state['periods'] = periods
     # Validate period shape/overlap before forming dictionary expectations.
@@ -190,7 +197,7 @@ def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=N
     shape['snapshot_id'] = digest(shape)
     asset_lifecycle.validate(shape, manifest['asset_ids'], min(sessions), target)
     audit = audit_periods(conn, periods, manifest['asset_ids'], sessions)
-    proof = dict(parent_checkpoint=state['sha256'], parent_uri=checkpoint_uri, sources=evidence,
+    proof = dict(parent_checkpoint=state['sha256'], parent_uri=parent_uri, sources=evidence,
                  audit=audit, verification_basis='PUBLIC_REFERENCE_AND_CERTIFIED_PRICE_COVERAGE')
     evidence_uri = _freeze(root, 'listing_audit', proof)
     contract = {k: v for k, v in shape.items() if k != 'snapshot_id'}
