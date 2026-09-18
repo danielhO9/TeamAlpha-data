@@ -157,6 +157,11 @@ def checked_policy(policy):
         raise ValueError('invalid availability minute')
     if policy.get('short_market') not in ('UNKNOWN','KRX'):
         raise ValueError('invalid short market scope')
+    basis=policy.get('short_market_basis','EXTERNAL_VERIFICATION')
+    if basis not in ('EXTERNAL_VERIFICATION','PROVIDER_TRUST'):
+        raise ValueError('invalid short market verification basis')
+    if basis=='PROVIDER_TRUST' and (policy.get('short_market')!='KRX' or not policy.get('provider_trust_evidence')):
+        raise ValueError('provider trust requires explicit acceptance evidence')
     if policy['short_market']=='KRX' and not policy.get('short_market_evidence'):
         raise ValueError('short market scope requires evidence reference')
     if policy['short_market']=='KRX':
@@ -189,11 +194,17 @@ def collect_partition(client, aid, ticker, dates, venue, policy):
         first=date.fromisoformat(policy.get('short_market_verified_from','9999-12-31'))
         through=date.fromisoformat(policy.get('short_market_verified_through','0001-01-01'))
         for day in dates:
-            verified=policy['short_market']=='KRX' and first<=day<=through
+            trusted=policy.get('short_market_basis')=='PROVIDER_TRUST'
+            verified=policy['short_market']=='KRX' and (trusted or first<=day<=through)
             values=silver.short_sale(short[day],volume[day],same_market=verified)
             values.update(short_market='KRX' if verified else 'UNKNOWN',
                           volume_market='KRX', volume_adjustment='UNADJUSTED',
                           market_scope_evidence=policy.get('short_market_evidence') if verified else None)
+            if trusted:
+                values.update(market_scope_basis='PROVIDER_TRUST',
+                              market_scope_evidence=policy['provider_trust_evidence'],
+                              external_scope_evidence=policy.get('short_market_evidence'),
+                              external_scope_verified_through=policy.get('short_market_verified_through'))
             output.append(silver.observation(aid,ticker,day,'J','short',values,sr+vr,policy))
     return output
 
@@ -331,6 +342,9 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
 def daily(day, *, conn):
     """Called by the existing ECS schedule only after explicit deployment opt-in."""
     if os.environ.get('KIS_FLOWS_ENABLED','0')!='1':return None
+    if os.environ.get('KIS_DAILY_MODE')=='PROVIDER_TRUST':
+        from pipeline.kis_provider_daily import daily as provider_daily
+        return provider_daily(day,conn=conn)
     target=datetime.strptime(day,'%Y%m%d').date()
     import exchange_calendars as xcals
     calendar=xcals.get_calendar('XKRX',start=str(target-timedelta(days=30)),end=str(target+timedelta(days=7)))
