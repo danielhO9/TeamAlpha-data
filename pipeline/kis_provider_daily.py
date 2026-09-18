@@ -1,7 +1,7 @@
 """Daily KIS collection under explicit provider trust, without KRX web login.
 
 The research export is pinned by content hash; its source date is never advanced.
-Public KIND/NXT reference deltas are captured before expected-date validation.
+Provider listing metadata and public NXT reference deltas are captured before expected-date validation.
 Only reference metadata is checkpointed here. KIS row checks remain in kis_flows.
 """
 from __future__ import annotations
@@ -9,9 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-import re
 from datetime import date, datetime, timedelta, timezone
-from html.parser import HTMLParser
 
 import requests
 
@@ -20,46 +18,10 @@ from pipeline.common.sink import write_text
 from pipeline.silver import asset_lifecycle
 
 
-class _Rows(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.rows, self.row, self.cell = [], [], None
-
-    def handle_starttag(self, tag, attrs):
-        if tag == 'tr': self.row = []
-        if tag in ('td', 'th'): self.cell = []
-
-    def handle_data(self, data):
-        if self.cell is not None: self.cell.append(data)
-
-    def handle_endtag(self, tag):
-        if tag in ('td', 'th') and self.cell is not None:
-            self.row.append(' '.join(''.join(self.cell).split()))
-            self.cell = None
-        if tag == 'tr' and self.row: self.rows.append(self.row)
-
-
-def delistings(raw):
-    parser = _Rows()
-    parser.feed(raw.decode('euc-kr'))
-    rows = parser.rows
-    if not rows or rows[0][:4] != ['번호', '회사명', '종목코드', '폐지일자']:
-        raise ValueError('KIND delisting response schema changed')
-    if rows[1:] == [['결과값이 없습니다.']]: return []
-    if not rows[1:]: raise ValueError('KIND empty table without explicit no-results marker')
-    result = []
-    for row in rows[1:]:
-        if len(row) < 4 or not re.fullmatch(r'[0-9A-Z]{6}', row[2]):
-            raise ValueError('invalid KIND delisting row')
-        result.append((row[2], date.fromisoformat(row[3])))
-    if len(result) != len(set(result)): raise ValueError('duplicate KIND delisting')
-    return result
-
-
 def close_periods(periods, events, first, last):
     result = copy.deepcopy(periods)
     for ticker, day in events:
-        if not first <= day <= last: raise ValueError('KIND date outside requested delta')
+        if not first <= day <= last: raise ValueError('provider delisting date outside requested delta')
         matches = [r for r in result if r['ticker'] == ticker
                    and date.fromisoformat(r['start']) < day
                    and (r['end'] is None or date.fromisoformat(r['end']) >= day)]
@@ -156,7 +118,37 @@ def audit_periods(conn, periods, ids, sessions):
                 verified_through=str(max(sessions)), price_rows=len(rows), **errors)
 
 
-def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=None):
+def refresh_listing(conn, periods, ids, sessions, through, target, client, evidence):
+    # Missing expected prices are candidates for metadata lookup, never proof of delisting.
+    expected = {(r['asset_id'], d) for r in periods for d in sessions
+                if date.fromisoformat(r['start']) <= d and (r['end'] is None or d <= date.fromisoformat(r['end']))}
+    with conn.cursor() as cur:
+        cur.execute("""SELECT asset_id,trade_date FROM price_daily
+            WHERE source='KRX' AND market IN ('KOSPI','KOSDAQ') AND asset_id=ANY(%s)
+              AND trade_date BETWEEN %s AND %s""", (ids, min(sessions), max(sessions)))
+        actual = set(cur.fetchall())
+    conn.rollback()
+    missing = expected - actual
+    events = []
+    for aid in sorted({a for a, d in missing}):
+        candidates = [r for r in periods if r['asset_id']==aid and r['end'] is None]
+        if len(candidates)!=1 or client is None:
+            raise ValueError(f'expected price missing without one live listing: {aid}')
+        ticker = candidates[0]['ticker']
+        row, receipt = client.stock_info(ticker)
+        value = row.get('lstg_abol_dt', '')
+        # Use the terminal product date, not a market-transfer exit date.
+        if not value or value=='00000000':
+            raise ValueError(f'expected price missing; KIS does not confirm terminal delisting: {ticker}')
+        day = datetime.strptime(value, '%Y%m%d').date()
+        if any(d < day for a, d in missing if a==aid):
+            raise ValueError(f'price missing before provider delisting: {ticker}')
+        events.append((ticker, day))
+        evidence.append(receipt['raw_uri'])
+    return close_periods(periods, events, through + timedelta(days=1), target) if events else periods
+
+
+def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=None, client=None):
     """Refresh public references. The shared daily writer lock must be held by caller."""
     from pipeline.kis_flows import read_json
     state = read_json(checkpoint_uri)
@@ -173,13 +165,6 @@ def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=N
     state = copy.deepcopy(state)
     evidence = []
     if target > through:
-        params = dict(method='searchDelCompanySub', forward='delcompany_down', currentPageSize='3000',
-                      pageIndex='1', fromDate=str(through + timedelta(days=1)), toDate=str(target), marketType='', tabType='1')
-        raw, uri = _fetch(session, root, 'https://kind.krx.co.kr/investwarn/delcompany.do', params, html=True)
-        events = delistings(raw)
-        if len(events) >= 3000: raise ValueError('KIND pagination needed')
-        state['periods'] = close_periods(state['periods'], events, through + timedelta(days=1), target)
-        evidence.append(uri)
         import exchange_calendars as xcals
         cal = xcals.get_calendar('XKRX', start=str(through), end=str(target + timedelta(days=7)))
         closed = {r['date'] for r in policy.get('calendar_exclusions', [])}
@@ -195,7 +180,8 @@ def prepare(conn, manifest, policy, sessions, root, checkpoint_uri, *, session=N
             state['nxt_event_active'], intervals = nxt_day(day, body, changes, state['nxt_event_active'],
                 state['asset_tickers'], state['permanent_exclusions'], uri)
             state['nxt_intervals'].extend(intervals)
-    periods = state['periods']
+    periods = refresh_listing(conn, state['periods'], manifest['asset_ids'], sessions, through, target, client, evidence)
+    state['periods'] = periods
     # Validate period shape/overlap before forming dictionary expectations.
     shape = dict(schema='asset-listing-snapshot-v1', asset_ids=manifest['asset_ids'],
                  coverage_start=str(min(sessions)), verified_through=str(target),
@@ -273,9 +259,10 @@ def daily(day, *, conn):
     available = [v.date() for v in calendar.sessions_in_range(str(lower), str(target)) if str(v.date()) not in closed]
     if len(available) < 5: raise ValueError('five market sessions required')
     sessions = [d for d in available if d >= min(available[-5], through + timedelta(days=1))]
-    manifest_uri, state_uri, pending_state = prepare(conn, manifest, policy, sessions, root, os.environ['KIS_DAILY_REFERENCE_URI'])
+    client = k.Client(root)
+    manifest_uri, state_uri, pending_state = prepare(conn, manifest, policy, sessions, root, os.environ['KIS_DAILY_REFERENCE_URI'], client=client)
     result = k.run(conn=conn, manifest_uri=manifest_uri, policy_uri=os.environ['KIS_POLICY_URI'],
-                   root=root, start=min(sessions), end=max(sessions), publish=True, refresh=True)
+                   root=root, start=min(sessions), end=max(sessions), publish=True, refresh=True, client=client)
     result.update(reference_state_uri=state_uri, watchlist_source_as_of=manifest['as_of'],
                   market_scope_basis='PROVIDER_TRUST', krx_external_verification_required=False)
     _freeze(root, 'daily_results', result)

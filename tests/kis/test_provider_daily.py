@@ -69,11 +69,6 @@ def test_delisting_excludes_effective_day_but_not_previous_day():
     with pytest.raises(ValueError,match='outside requested'): daily.close_periods(p,[('006380',D)],date(2026,9,18),date(2026,9,18))
 
 
-def test_login_or_empty_kind_response_not_accepted():
-    for raw in [b'<html>Login</html>', '<table><tr><th>번호</th><th>회사명</th><th>종목코드</th><th>폐지일자</th></tr></table>'.encode('euc-kr')]:
-        with pytest.raises(ValueError): daily.delistings(raw)
-
-
 def test_audit_rejects_missing_dates_and_identity_mismatch():
     conn=MagicMock(); cur=conn.cursor.return_value.__enter__.return_value
     p=[dict(asset_id=1,ticker='005930',start='2000-01-01',end=None)]
@@ -87,7 +82,7 @@ def test_audit_rejects_missing_dates_and_identity_mismatch():
 def test_failed_ingestion_does_not_advance_reference_watermark(monkeypatch):
     for name,value in {'KIS_BRONZE_ROOT':'root','KIS_UNIVERSE_URI':'manifest','KIS_POLICY_URI':'policy','KIS_DAILY_REFERENCE_URI':'checkpoint'}.items(): monkeypatch.setenv(name,value)
     manifest=dict(as_of='2026-08-10',asset_ids=[1]);manifest['sha256']=digest(manifest)
-    with patch.object(k,'read_json',side_effect=[manifest,policy(),{'through':'2026-09-01'}]), patch.object(daily,'prepare',return_value=('current','state',{'through':str(D)})) as prep, patch.object(k,'run',return_value={'failures':[{'error':'missing'}]}) as run, patch.object(daily,'_freeze'),patch.object(daily,'write_text') as write:
+    with patch.object(k,'read_json',side_effect=[manifest,policy(),{'through':'2026-09-01'}]), patch.object(daily,'prepare',return_value=('current','state',{'through':str(D)})) as prep, patch.object(k,'run',return_value={'failures':[{'error':'missing'}]}) as run, patch.object(daily,'_freeze'),patch.object(k,'Client'),patch.object(daily,'write_text') as write:
         with pytest.raises(RuntimeError,match='incomplete'): daily.daily('20260917',conn=Mock())
         write.assert_not_called()
         assert run.call_args.kwargs['start']==date(2026,9,2)
@@ -102,3 +97,26 @@ def test_equal_row_count_with_wrong_day_is_not_accepted():
         with pytest.raises(ValueError,match='final coverage'): daily.verify_collection(conn,'manifest',policy(),[D])
         cur.fetchall.return_value=[(*r[:1],D,*r[2:]) for r in rows]
         assert daily.verify_collection(conn,'manifest',policy(),[D])['missing']==0
+
+
+def test_missing_price_requires_provider_delisting_and_date_agreement():
+    conn=MagicMock();conn.cursor.return_value.__enter__.return_value.fetchall.return_value=[]
+    client=Mock();p=[dict(asset_id=1,ticker='006380',start='2000-01-01',end=None)]
+    client.stock_info.return_value=({'lstg_abol_dt':''},{'raw_uri':'source'})
+    with pytest.raises(ValueError,match='does not confirm'):daily.refresh_listing(conn,p,[1],[D],date(2026,9,16),D,client,[])
+    client.stock_info.return_value=({'lstg_abol_dt':'20260918'},{'raw_uri':'source'})
+    with pytest.raises(ValueError,match='before provider delisting'):daily.refresh_listing(conn,p,[1],[D],date(2026,9,16),D,client,[])
+    client.stock_info.return_value=({'lstg_abol_dt':'20260917'},{'raw_uri':'source'})
+    evidence=[]
+    assert daily.refresh_listing(conn,p,[1],[D],date(2026,9,16),D,client,evidence)[0]['end']=='2026-09-16'
+    assert evidence==['source']
+
+
+def test_stock_info_accepts_only_exact_or_documented_product_identity():
+    from pipeline.bronze.kis_history import Client
+    client=Client('/unused',token='test')
+    for value in ['006380','00000A006380']:
+        with patch.object(client,'_capture',return_value=({'output':{'pdno':value}},{})):
+            assert client.stock_info('006380')[0]['pdno']==value
+    with patch.object(client,'_capture',return_value=({'output':{'pdno':'00000A005930'}},{})):
+        with pytest.raises(ValueError,match='identity'):client.stock_info('006380')

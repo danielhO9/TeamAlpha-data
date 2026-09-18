@@ -112,22 +112,7 @@ class Client:
         self._s3.put_object(Bucket=bucket, Key=key, Body=text.encode('utf-8'))
         return uri
 
-    def page(self, kind, ticker, venue, start, end):
-        if kind not in ENDPOINTS or venue not in ('J', 'NX', 'UN'):
-            raise ValueError('unsupported KIS request')
-        if kind == 'short' and venue != 'J':
-            raise ValueError('NXT/UN short-sale endpoint is not certified')
-        api._ticker(ticker)
-        path, tr_id, output, date_key = ENDPOINTS[kind]
-        params = {'FID_COND_MRKT_DIV_CODE': venue, 'FID_INPUT_ISCD': ticker}
-        if kind == 'investor':
-            params.update(FID_INPUT_DATE_1=end.strftime('%Y%m%d'),
-                          FID_ORG_ADJ_PRC='', FID_ETC_CLS_CODE='')
-        else:
-            params.update(FID_INPUT_DATE_1=start.strftime('%Y%m%d'),
-                          FID_INPUT_DATE_2=end.strftime('%Y%m%d'))
-        if kind == 'volume':
-            params.update(FID_PERIOD_DIV_CODE='D', FID_ORG_ADJ_PRC='1')
+    def _capture(self, kind, ticker, venue, path, tr_id, params):
         with self._token_lock:
             if self.token is None or (self.token_issued_at is not None and time.monotonic() - self.token_issued_at > 23 * 3600):
                 for attempt in range(2):
@@ -163,6 +148,37 @@ class Client:
                    'headers': headers, 'provider_available_at': None}
         self._write(json.dumps(receipt, sort_keys=True),
                    f'{self.root}/market_flows/kis_history/observations/{request_id}/{fetched}.json')
+        return body, receipt
+
+    def stock_info(self, ticker):
+        """Capture provider listing metadata, sharing the same token/request gate."""
+        api._ticker(ticker)
+        body, receipt = self._capture('stock_info', ticker, 'J',
+            '/uapi/domestic-stock/v1/quotations/search-stock-info', 'CTPF1002R',
+            {'PRDT_TYPE_CD':'300', 'PDNO':ticker})
+        row = body.get('output')
+        if not isinstance(row, dict) or row.get('pdno') not in (ticker, '00000A'+ticker):
+            raise ValueError('KIS stock metadata identity mismatch')
+        return row, receipt
+
+    def page(self, kind, ticker, venue, start, end):
+        if kind not in ENDPOINTS or venue not in ('J', 'NX', 'UN'):
+            raise ValueError('unsupported KIS request')
+        if kind == 'short' and venue != 'J':
+            raise ValueError('NXT/UN short-sale endpoint is not certified')
+        api._ticker(ticker)
+        path, tr_id, output, date_key = ENDPOINTS[kind]
+        params = {'FID_COND_MRKT_DIV_CODE': venue, 'FID_INPUT_ISCD': ticker}
+        if kind == 'investor':
+            params.update(FID_INPUT_DATE_1=end.strftime('%Y%m%d'),
+                          FID_ORG_ADJ_PRC='', FID_ETC_CLS_CODE='')
+        else:
+            params.update(FID_INPUT_DATE_1=start.strftime('%Y%m%d'),
+                          FID_INPUT_DATE_2=end.strftime('%Y%m%d'))
+        if kind == 'volume':
+            params.update(FID_PERIOD_DIV_CODE='D', FID_ORG_ADJ_PRC='1')
+        body, receipt = self._capture(kind,ticker,venue,path,tr_id,params)
+        uri = receipt['raw_uri']
         # Keep successful but malformed/empty responses in Bronze too.
         rows = body.get(output)
         if not isinstance(rows, list):
