@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import exchange_calendars as xcals
 
-from pipeline import alternative_data_incremental, dart_silver_backfill_ecs, kis_flows
+from pipeline import alternative_data_incremental, dart_silver_backfill_ecs, kis_flows, fmp_regime
 from pipeline.bronze import (
     corporate_actions,
     dart_support_action_families,
@@ -20,6 +20,8 @@ from pipeline.bronze import (
     dividends,
     financials,
     fmp as fmp_bronze,
+    fmp_external,
+    fmp_macro,
     index,
     stock_krxapi,
 )
@@ -682,6 +684,11 @@ def _run_fmp_incremental(
     dart_silver_backfill_ecs.assert_daily_certification_lock(
         certification_lock,
     )
+    # Independent receipt: an already-certified stock batch must not skip new
+    # regime inputs, or a failed regime retry. Bronze snapshots make retries cheap.
+    fmp_macro.run_daily(krx_day)
+    fmp_external.run_daily(krx_day)
+    fmp_regime.run_daily(fmp_day)
     if repository.certified_target_exists(
         certification_lock, "fmp_daily", parsed_fmp_day,
     ):

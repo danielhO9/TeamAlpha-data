@@ -6,6 +6,18 @@ database의 **`gold` schema**에 저장하는 배치 파이프라인입니다.
 
 ## 프로젝트 개요
 
+FMP 레짐 입력(변동성·달러·주가지수, 채권 ETF, 미국 국채금리)의 수집 및 배포 절차는 [FMP 레짐 데이터 안내](docs/fmp-regime.md)를 참고하세요.
+
+2015년부터 coverage를 확인한 한국 중심 경제지표 14개 계열의 **Bronze 전용** 수집은
+[FMP 매크로 Bronze 안내](docs/fmp-macro-bronze.md)를 참고하세요. 원문/허용 목록 선택본을 분리하고,
+발표시점과 수정 이력 검증 전에는 Silver·백테스트 입력으로 자동 편입하지 않습니다.
+
+추가 환율 5개·COT 포지션 6개·ETF 3개의 원문과 미검증 PIT 시점 분리는
+[FMP 외부 레짐 Bronze 안내](docs/fmp-external-bronze.md)를 참고하세요.
+대만 ETF·환율, 변동성 지수 3개, 미국 금리 COT 4개를 더한 별도 9개 묶음은
+[FMP 위험 레짐 Bronze 안내](docs/fmp-risk-bronze.md)를 참고하세요.
+추가 일일 수집 연결은 코드 기준이며 운영 배포·PIT 승인과 구분합니다.
+
 ```text
 KRX OpenAPI / OpenDART / marcap / FMP stable API
                     │
