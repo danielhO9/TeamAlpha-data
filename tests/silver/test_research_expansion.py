@@ -83,6 +83,17 @@ def test_observation_identity_is_immutable_and_vintage_sensitive():
         research.observation(**kwargs, available_at=first, observed_at=second)
 
 
+def test_universe_filter_precedes_expensive_statement_parsing(tmp_path, monkeypatch):
+    path = tmp_path / "financials/fmp/income/year=2025/response.json"
+    checksum = write(path, [dict(symbol="OUTSIDE", date="2025-12-31", period="FY")])
+    monkeypatch.setattr(fmp, "_parse_date", lambda _: pytest.fail("excluded issuer parsed"))
+    rows, excluded = research_backfill.prepare(
+        dict(path=str(path), sha256=checksum, dataset="FMP_STATEMENT"),
+        eligible_identifiers={"ADMITTED"},
+    )
+    assert not rows and excluded == 1
+
+
 @pytest.fixture(scope="module")
 def pg(tmp_path_factory):
     if any(shutil.which(x) is None for x in ("initdb", "pg_ctl")):

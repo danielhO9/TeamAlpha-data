@@ -85,6 +85,12 @@ def run(*, bucket, datasets, workers, max_files, report_prefix):
                 state.conn = db.connect()
                 state.conn.execute("SET statement_timeout='90s'")
                 state.conn.execute("SET lock_timeout='5s'")
+                state.eligible_identifiers = {
+                    str(row[0]) for row in state.conn.execute(
+                        "SELECT DISTINCT identifier FROM asset_identifier "
+                        "WHERE source='FMP' AND identifier_type='ticker'"
+                    ).fetchall()
+                }
                 state.conn.commit()
                 connections.append(state.conn)
             entry = {"path": path, "dataset": item["dataset"]}
@@ -104,6 +110,7 @@ def run(*, bucket, datasets, workers, max_files, report_prefix):
                 if manifest.get("complete") is not True:
                     raise ValueError("incomplete Bronze manifest")
                 entry["sha256"] = manifest["sha256"]
+                inputs["eligible_identifiers"] = state.eligible_identifiers
             return research_backfill.replay(state.conn, entry, prepared_inputs=inputs)
         except Exception as exc:
             if hasattr(state, "conn"):

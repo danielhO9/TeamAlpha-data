@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import io
 import json
+from functools import cache
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def checkpoint_version(entry):
     return version
 
 
-def prepare(entry, *, body=None, disclosure_body=None):
+def prepare(entry, *, body=None, disclosure_body=None, eligible_identifiers=None):
     path, dataset = entry["path"], entry["dataset"]
     body = read_bytes(path) if body is None else body
     if body is None or hashlib.sha256(body).hexdigest() != entry["sha256"]:
@@ -90,17 +91,20 @@ def prepare(entry, *, body=None, disclosure_body=None):
         raise ValueError("unrecognized FMP profile path")
     if dataset == "FMP_PROFILE" and observed is None:
         raise ValueError("profile requires actual manifest received_at; no date inference")
+    # Period/filing dates repeat across thousands of rows in bulk responses.
+    parse_date = cache(fmp._parse_date)
+    parse_timestamp = cache(fmp._parse_timestamp)
     for row in raw:
         symbol = fmp._text(row.get("symbol"))
-        if not symbol:
+        if not symbol or (eligible_identifiers is not None and symbol not in eligible_identifiers):
             excluded += 1
             continue
         metadata = {}
         available = observed
         if dataset == "FMP_STATEMENT":
-            period_end = fmp._parse_date(row.get("date"))
-            filed = fmp._parse_date(row.get("filingDate"))
-            available = fmp._parse_timestamp(row.get("acceptedDate"))
+            period_end = parse_date(row.get("date"))
+            filed = parse_date(row.get("filingDate"))
+            available = parse_timestamp(row.get("acceptedDate"))
             if available is None and filed is not None:
                 available = datetime.combine(filed + timedelta(days=1), time(), timezone.utc)
             if (period_end is None or available is None or available.date() <= period_end
@@ -129,6 +133,8 @@ def replay(conn, entry, *, recheck=False, prepared_inputs=None):
         if cur.fetchone() and not recheck:
             conn.rollback()
             return {"path": entry["path"], "status": "SKIPPED"}
+    # Never keep a DB transaction open while reading/parsing a large S3 object.
+    conn.rollback()
     records, excluded = prepare(entry, **(prepared_inputs or {}))
     source = "KRX" if entry["dataset"] == "DART_EVENT" else "FMP"
     with conn.cursor() as cur:
