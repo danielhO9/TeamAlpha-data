@@ -137,6 +137,9 @@ one persistent DB connection per worker. Use `--max-files` for a canary.
 Each worker loads the admitted FMP identifier set once, filters unrelated issuers
 before expensive date/hash conversion, and caches repeated dates within each
 file. S3 parsing never holds a DB transaction open.
+`financials/fmp/latest/` contains collection-trigger filing indexes, not statement
+bodies. These are excluded from the statement replay inventory and remain in
+Bronze; they must not be counted as failed financial-statement publications.
 Resume uses the same content checkpoints. Ambiguous/missing official disclosure
 identities are reported as `REVIEW_REQUIRED`, not guessed. Outcomes/progress are
 persisted every 25 files. Newly introduced FMP macro/external Bronze collections

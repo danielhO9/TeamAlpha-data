@@ -13,6 +13,7 @@ import psycopg
 import pytest
 
 from pipeline.silver import fmp, full_statements, research_backfill
+from pipeline.silver import research_backfill_ecs
 from pipeline.silver import research_observations as research
 
 
@@ -108,6 +109,15 @@ def test_daily_profiles_are_hashed_only_after_universe_admission(tmp_path, monke
     assets, _, _ = fmp.prepare_universe(str(tmp_path))
     assert symbols == ["AAA"]
     assert len(assets.attrs["research_observations"]) == 1
+
+
+def test_discovery_excludes_collection_trigger_indexes(monkeypatch):
+    keys = ["financials/fmp/latest/snapshot_date=2026-09-01/page=0/response.json",
+            "financials/fmp/balance/year=2025/period=FY/response.csv",
+            "financials/fmp/by-symbol/snapshot_date=2026-09-01/symbol=AAA/income-statement/response.json"]
+    monkeypatch.setattr(research_backfill_ecs, "list_keys", lambda *_: keys)
+    items = research_backfill_ecs.discover(None, "bucket", ["FMP_STATEMENT"])
+    assert [item["key"] for item in items] == keys[1:]
 
 
 @pytest.fixture(scope="module")

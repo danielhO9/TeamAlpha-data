@@ -19,7 +19,7 @@ import time
 import boto3
 
 from pipeline.common import db
-from pipeline.silver import research_backfill
+from pipeline.silver import fmp, research_backfill
 from pipeline.silver_quality import migrate
 
 
@@ -39,7 +39,8 @@ def discover(client, bucket, datasets):
     if "FMP_STATEMENT" in datasets:
         items.extend({"key": k, "dataset": "FMP_STATEMENT"}
                      for k in list_keys(client, bucket, "financials/fmp/")
-                     if k.endswith(("/response.json", "/response.csv")))
+                     if k.endswith(("/response.json", "/response.csv"))
+                     and fmp._financial_kind("/" + k) is not None)
     if "FMP_PROFILE" in datasets:
         items.extend({"key": k, "dataset": "FMP_PROFILE"}
                      for k in list_keys(client, bucket, "stock/fmp/universe/")
