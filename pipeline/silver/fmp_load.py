@@ -13,7 +13,7 @@ import pandas as pd
 
 from pipeline.common import db
 from pipeline.common.paths import base_uri
-from pipeline.silver import fmp
+from pipeline.silver import fmp, research_observations
 from pipeline.silver_quality import repository
 from pipeline.silver_quality.models import (
     CheckResult,
@@ -155,6 +155,9 @@ def _publish(
         conn, bundle.fundamentals, identifier_map, context.run_id,
     )
     fmp.publish_actions(conn, bundle.actions, identifier_map, context.run_id)
+    research_observations.publish(
+        conn, bundle.research_observations, identifier_map, context.run_id,
+    )
 
 
 def _add_previous_commodity_roll_check(conn, bundle: CandidateBundle) -> None:
@@ -421,6 +424,7 @@ def _backfill(
             raise ValueError("fromyear must be <= toyear")
 
         assets, identifiers, universe_stats = fmp.prepare_universe(base)
+        profile_records = assets.attrs.pop("research_observations", [])
         fx_assets, fx_identifiers, _, _ = fmp.prepare_fx(base)
         commodity_assets, commodity_identifiers, _, commodity_stats = (
             fmp.prepare_commodities(base)
@@ -443,6 +447,7 @@ def _backfill(
                 CandidateBundle(
                     assets=assets,
                     identifiers=identifiers,
+                    research_observations=profile_records,
                     stats={
                         "asset": universe_stats,
                         "commodity": commodity_stats,
@@ -486,6 +491,18 @@ def _backfill(
             fundamentals, stats = fmp.prepare_fundamentals(
                 base, identifiers, year=year,
             )
+            research_records = fundamentals.attrs.pop("research_observations", [])
+            research_key = f"research:financials:year={year}"
+            if research_records and research_key not in completed:
+                _certify_partition(
+                    conn, parent, research_key,
+                    CandidateBundle(
+                        assets=assets, identifiers=identifiers,
+                        research_observations=research_records,
+                        stats={"asset": universe_stats, "commodity": commodity_stats,
+                               "_source": "FMP"},
+                    ),
+                )
             for fundamental_key, partition in _fundamental_partitions(
                 year, fundamentals,
             ):

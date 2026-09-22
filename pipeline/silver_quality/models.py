@@ -40,6 +40,7 @@ class CandidateBundle:
     fundamentals: pd.DataFrame = field(default_factory=pd.DataFrame)
     actions: pd.DataFrame = field(default_factory=pd.DataFrame)
     stats: dict[str, Any] = field(default_factory=dict)
+    research_observations: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

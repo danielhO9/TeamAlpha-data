@@ -39,6 +39,7 @@ WARNING_TRACKED_MODES = frozenset({
     "krx_total_return_rebuild",
     "maintenance_konex_exclusion",
     "alternative_research_inputs",
+    "research_backfill",
     "kis_market_flows",
 })
 # Backwards-compatible alias (older imports referenced this name).

@@ -20,6 +20,7 @@ from pipeline.common import db
 from pipeline.common.sink import read_bytes
 from pipeline.fmp_commodities import COMMODITY_BY_SYMBOL, COMMODITY_SPECS
 from pipeline.silver_quality.models import CandidateBundle
+from pipeline.silver import research_observations
 
 SUPPORTED_EXCHANGES = {"NASDAQ", "NYSE", "AMEX"}
 NON_EQUITY_NAME = re.compile(
@@ -298,12 +299,20 @@ def prepare_universe(
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     source_files, delisted_files, change_files = _universe_files(base, target_date)
     merged: dict[str, dict] = {}
+    profile_observations = []
     for path in source_files:
         frame = _raw_frame(path)
+        observed_at = _manifest_received_at(path)
         for raw in frame.to_dict("records"):
             symbol = _text(raw.get("symbol"))
             if not symbol:
                 continue
+            if observed_at is not None:
+                profile_observations.append(research_observations.observation(
+                    identifier=symbol, source="FMP", dataset="FMP_PROFILE",
+                    raw_row=raw, source_file=path, available_at=observed_at,
+                    observed_at=observed_at,
+                ))
             current = merged.setdefault(symbol, {"symbol": symbol, "_files": []})
             for key, value in raw.items():
                 if _text(value) is not None or isinstance(value, bool):
@@ -522,6 +531,12 @@ def prepare_universe(
             ["natural_key", "identifier_type", "identifier"],
         ].head(30).to_dict("records")
         identifiers = identifiers.loc[~ambiguous].reset_index(drop=True)
+    admitted_symbols = set(identifiers.loc[
+        identifiers["identifier_type"].eq("ticker"), "identifier",
+    ]) if not identifiers.empty else set()
+    assets.attrs["research_observations"] = [
+        row for row in profile_observations if row["identifier"] in admitted_symbols
+    ]
     return assets, identifiers, {
         "raw_symbol_count": len(merged),
         "admitted_symbol_count": len(admitted),
@@ -537,7 +552,10 @@ def prepare_universe(
 
 
 def _manifest_received_at(path: str) -> datetime | None:
-    manifest_path = str(Path(path).with_name("manifest.json"))
+    manifest_path = (
+        path.rsplit("/", 1)[0] + "/manifest.json"
+        if path.startswith("s3://") else str(Path(path).with_name("manifest.json"))
+    )
     raw = read_bytes(manifest_path)
     if raw is None:
         return None
@@ -1040,6 +1058,7 @@ def prepare_fundamentals(
     base: str,
     identifiers: pd.DataFrame,
     year: int | None = None,
+    research_target_date: date | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     ticker_rows = (
         identifiers.loc[identifiers["identifier_type"].eq("ticker")]
@@ -1060,6 +1079,7 @@ def prepare_fundamentals(
     input_rows = 0
     nonfinite_values = 0
     missing_available_at_values = 0
+    statement_observations = []
     for path in paths:
         kind = _financial_kind(path)
         if kind is None:
@@ -1067,6 +1087,10 @@ def prepare_fundamentals(
         year_partition = re.search(r"/year=(\d{4})/", path.replace("\\", "/"))
         if year is not None and year_partition and int(year_partition.group(1)) != year:
             continue
+        preserve_research = (
+            research_target_date is None
+            or f"/snapshot_date={research_target_date.isoformat()}/" in path.replace("\\", "/")
+        )
         frame = _raw_frame(path)
         input_rows += len(frame)
         for raw in frame.to_dict("records"):
@@ -1093,6 +1117,13 @@ def prepare_fundamentals(
                 or f"{symbol}:{period_end}:{fiscal_period}:{kind}"
             )
             reported_currency = (_text(raw.get("reportedCurrency")) or "").upper() or None
+            if preserve_research and available_at is not None and available_at.date() > period_end:
+                statement_observations.append(research_observations.observation(
+                    identifier=symbol, source="FMP", dataset="FMP_STATEMENT",
+                    raw_row=raw, source_file=path, available_at=available_at,
+                    metadata={"statement_type": STATEMENT_TYPES[kind],
+                              "period_end": period_end.isoformat()},
+                ))
             for source_metric, (metric, unit_type) in FINANCIAL_METRICS[kind].items():
                 value = _number(raw.get(source_metric))
                 if value is None:
@@ -1135,6 +1166,7 @@ def prepare_fundamentals(
     ]
     if not frame.empty:
         frame = frame.sort_values("source_file").drop_duplicates(key, keep="last").reset_index(drop=True)
+    frame.attrs["research_observations"] = statement_observations
     return frame, {
         "input_rows": input_rows,
         "transformed_rows": len(frame),
@@ -1279,6 +1311,7 @@ def market_closed(base: str, target_date: date) -> bool:
 
 def build_candidates(base: str, target_date: date | None = None) -> CandidateBundle:
     assets, identifiers, universe_stats = prepare_universe(base, target_date)
+    research_records = assets.attrs.pop("research_observations", [])
     prices, price_stats = prepare_prices(base, assets, identifiers, target_date)
     fx_assets, fx_identifiers, fx_prices, fx_stats = prepare_fx(base, target_date)
     commodity_assets, commodity_identifiers, commodity_prices, commodity_stats = (
@@ -1293,7 +1326,10 @@ def build_candidates(base: str, target_date: date | None = None) -> CandidateBun
     prices = pd.concat(
         [prices, fx_prices, commodity_prices], ignore_index=True,
     )
-    fundamentals, fundamental_stats = prepare_fundamentals(base, identifiers)
+    fundamentals, fundamental_stats = prepare_fundamentals(
+        base, identifiers, research_target_date=target_date,
+    )
+    research_records.extend(fundamentals.attrs.pop("research_observations", []))
     actions, action_stats = prepare_actions(base, identifiers)
     return CandidateBundle(
         assets=assets,
@@ -1301,6 +1337,7 @@ def build_candidates(base: str, target_date: date | None = None) -> CandidateBun
         prices=prices,
         fundamentals=fundamentals,
         actions=actions,
+        research_observations=research_records,
         stats={
             "asset": universe_stats,
             "price_daily": price_stats,

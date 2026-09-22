@@ -35,6 +35,7 @@ from pipeline.bronze.dart_support_action_families import (
     verify_support_action_families,
 )
 from pipeline.common import db
+from pipeline.silver import research_observations
 from pipeline.bronze.dart_viewer_corrections import (
     KNOWN_DAMAGED_DOCUMENT_RECEIPTS,
     MANIFEST_RELATIVE_PATH as VIEWER_MANIFEST_RELATIVE_PATH,
@@ -51,6 +52,7 @@ from pipeline.silver.reviewed_dividend_corrections import (
 
 
 COLUMNS = [
+    "research_raw_row",
     "identifier",
     "event_type",
     "announcement_date",
@@ -418,6 +420,7 @@ def _structured_row(
     report_name: object = None,
     corp_cls: object = None,
     accepted_date: object = None,
+    source_body_sha256: str | None = None,
 ) -> dict | None:
     ticker = _ticker_from_path(path)
     event_type = _event_from_path(path)
@@ -502,10 +505,11 @@ def _structured_row(
         "economic_evidence_sha256": None,
         "reviewed_correction_id": None,
         "payment_date_quality_status": None,
-        "source_body_sha256": hashlib.sha256(
+        "source_body_sha256": source_body_sha256 or hashlib.sha256(
             Path(path).read_bytes()
         ).hexdigest(),
         "source": "DART_STRUCTURED",
+        "research_raw_row": row,
         "source_file": path,
     }
 
@@ -2336,6 +2340,10 @@ def publish(
         )
     frame["asset_id"] = frame["asset_id"].astype("int64")
     frame["quality_run_id"] = quality_run_id
+    research_observations.publish(
+        conn, research_observations.dart_events(candidates),
+        identifier_map, quality_run_id,
+    )
     records = frame.to_dict("records")
     if not records:
         return 0
