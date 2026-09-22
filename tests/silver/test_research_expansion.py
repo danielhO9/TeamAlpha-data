@@ -94,6 +94,22 @@ def test_universe_filter_precedes_expensive_statement_parsing(tmp_path, monkeypa
     assert not rows and excluded == 1
 
 
+def test_daily_profiles_are_hashed_only_after_universe_admission(tmp_path, monkeypatch):
+    path = tmp_path / "stock/fmp/universe/company-screener/snapshot_date=2026-09-01/response.json"
+    write(path, [dict(symbol="AAA", companyName="AAA Inc", exchange="NYSE", isEtf=False, isFund=False),
+                 dict(symbol="OUTSIDE", companyName="Outside", exchange="LSE")])
+    write(path.with_name("manifest.json"), {"received_at": "2026-09-01T00:00:00+00:00"})
+    symbols = []
+    original = research.observation
+    def capture(**kwargs):
+        symbols.append(kwargs["identifier"])
+        return original(**kwargs)
+    monkeypatch.setattr(research, "observation", capture)
+    assets, _, _ = fmp.prepare_universe(str(tmp_path))
+    assert symbols == ["AAA"]
+    assert len(assets.attrs["research_observations"]) == 1
+
+
 @pytest.fixture(scope="module")
 def pg(tmp_path_factory):
     if any(shutil.which(x) is None for x in ("initdb", "pg_ctl")):

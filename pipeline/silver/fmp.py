@@ -308,11 +308,9 @@ def prepare_universe(
             if not symbol:
                 continue
             if observed_at is not None:
-                profile_observations.append(research_observations.observation(
-                    identifier=symbol, source="FMP", dataset="FMP_PROFILE",
-                    raw_row=raw, source_file=path, available_at=observed_at,
-                    observed_at=observed_at,
-                ))
+                # Wait for the merged universe admission decision before
+                # cleaning/hashing profiles for non-equity/foreign symbols.
+                profile_observations.append((symbol, raw, path, observed_at))
             current = merged.setdefault(symbol, {"symbol": symbol, "_files": []})
             for key, value in raw.items():
                 if _text(value) is not None or isinstance(value, bool):
@@ -535,7 +533,13 @@ def prepare_universe(
         identifiers["identifier_type"].eq("ticker"), "identifier",
     ]) if not identifiers.empty else set()
     assets.attrs["research_observations"] = [
-        row for row in profile_observations if row["identifier"] in admitted_symbols
+        research_observations.observation(
+            identifier=symbol, source="FMP", dataset="FMP_PROFILE",
+            raw_row=raw, source_file=path, available_at=observed_at,
+            observed_at=observed_at,
+        )
+        for symbol, raw, path, observed_at in profile_observations
+        if symbol in admitted_symbols
     ]
     return assets, identifiers, {
         "raw_symbol_count": len(merged),
