@@ -26,6 +26,8 @@ certified `fundamental_statement_line` rows. Existing and newly certified lines
 become visible without copying financial history or a separate backfill.
 
 - Exact IDs only; colon/underscore namespace separators are normalized.
+- Migration 019 adds exact aliases for the historical official `ifrs_`
+  namespace found in older stored filings; 018 is not modified after application.
 - Names, company-specific extension IDs, and segment/member details are not
   guessed. They remain in the original Silver table for further mapping review.
 - All filing revisions and CFS/OFS variants survive.

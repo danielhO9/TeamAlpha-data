@@ -101,7 +101,7 @@ def pg(tmp_path_factory):
                 conn.execute("INSERT INTO asset_identifier VALUES ('AAA',1,'FMP','ticker','1900-01-01',NULL)")
                 conn.execute("CREATE TABLE dq_run(run_id uuid PRIMARY KEY,status text)")
                 migrations = Path("pipeline/silver_quality/migrations")
-                for name in ("013_alternative_research_inputs.sql", "014_industry_short_balance.sql", "018_research_expansion.sql"):
+                for name in ("013_alternative_research_inputs.sql", "014_industry_short_balance.sql", "018_research_expansion.sql", "019_dart_legacy_account_namespace.sql"):
                     conn.execute((migrations / name).read_text())
                 conn.execute("INSERT INTO asset VALUES (1)")
                 conn.commit()
@@ -153,6 +153,7 @@ def test_postgres_dart_mapping_preserves_periods_excludes_dimensions_and_names(p
         full_statements.publish(pg, frame, {"005930": 1}, run)
     assert pg.execute("SELECT metric,current_amount,current_cumulative_amount,metric_candidate_count FROM dart_standardized_statement_line").fetchall() == [("inventories", 100, 200, 1)]
     assert pg.execute("SELECT count(*) FROM fundamental_statement_line").fetchone()[0] == 3
+    assert pg.execute("SELECT metric FROM dart_account_metric_map WHERE account_id='ifrs_Inventories' AND statement_type='BS'").fetchone() == ("inventories",)
     pg.commit()
 
 
