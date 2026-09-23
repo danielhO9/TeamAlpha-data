@@ -62,6 +62,26 @@ def test_full_statement_transform_retains_every_statement_family(tmp_path: Path)
     }
 
 
+@pytest.mark.parametrize('matching', [True, False])
+def test_non_december_fy_requires_exact_cached_disclosure(tmp_path, matching):
+    uri = _write_json(tmp_path / (
+        'financials/dart_statement_lines/year=2026/corp=093240/report=11011/fs_type=CFS/'
+        f"sha256={'a' * 64}/response.json"), {'list':[{
+            'rcept_no':'20260921000083', 'corp_code':'00441243',
+            'sj_div':'BS', 'bsns_year':'2026', 'account_id':'ifrs-full_Assets',
+            'thstrm_amount':'100', 'ord':'1',
+        }]})
+    _write_json(tmp_path / 'financials/dart_disclosures/date=2026-09-21/regular-reports.json', [{
+        'rcept_no':'20260921000083' if matching else '20260921000084',
+        'corp_code':'00441243', 'report_nm':'사업보고서 (2026.06)',
+    }])
+    frame, stats = full_statements.prepare(files=[uri])
+    assert stats['rejected_rows'] == (0 if matching else 1)
+    if matching:
+        assert frame.iloc[0]['period_end'] == date(2026,6,30)
+        assert frame.iloc[0]['available_date'] == date(2026,9,22)
+
+
 @pytest.mark.parametrize(
     ("disclosure_type", "row", "expected"),
     [

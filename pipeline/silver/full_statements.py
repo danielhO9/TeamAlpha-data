@@ -5,6 +5,7 @@ import glob
 import hashlib
 import json
 import re
+from calendar import monthrange
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -94,6 +95,32 @@ def _path_meta(uri: str) -> tuple[str, int, str, str]:
     )
 
 
+def _cached_annual_period_end(uri, filing_id, corp_code, business_year, cache):
+    """Resolve non-December FY dates from exact, already captured disclosures.
+
+    No provider requests; absent or ambiguous evidence remains rejected.
+    """
+    filed = _filed(filing_id)
+    root = uri.replace('\\', '/').split('/financials/', 1)[0]
+    candidates = set()
+    for day in (filed, filed + timedelta(days=1)):
+        key = f'{root}/financials/dart_disclosures/date={day}/regular-reports.json'
+        if key not in cache:
+            raw = read_bytes(key)
+            cache[key] = json.loads(raw.decode('utf-8')) if raw else []
+        for disclosure in cache[key]:
+            if (disclosure.get('rcept_no') != filing_id
+                    or disclosure.get('corp_code') != corp_code):
+                continue
+            match = re.search(r'사업보고서\s*\((\d{4})\.(\d{2})\)',
+                              str(disclosure.get('report_nm') or ''))
+            if match:
+                year, month = map(int, match.groups())
+                if year == business_year and 1 <= month <= 12:
+                    candidates.add(date(year, month, monthrange(year, month)[1]))
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 def _iter_files(base: str) -> list[str]:
     return sorted(set(
         glob.glob(
@@ -112,6 +139,7 @@ def prepare(
     """Parse every numeric line without semantic account-name mapping."""
     selected = sorted(set(files if files is not None else _iter_files(str(base))))
     records: list[dict] = []
+    disclosure_cache = {}
     input_rows = excluded_rows = rejected_rows = 0
     for uri in selected:
         ticker, path_year, path_report, path_fs_type = _path_meta(uri)
@@ -150,6 +178,13 @@ def prepare(
             period_end = _period_end(
                 row.get("thstrm_dt"), business_year, report_code,
             )
+            if filed < period_end and report_code == '11011' and not row.get('thstrm_dt'):
+                evidenced_end = _cached_annual_period_end(
+                    uri, filing_id, str(row.get('corp_code') or ''),
+                    business_year, disclosure_cache,
+                )
+                if evidenced_end is not None:
+                    period_end = evidenced_end
             if filed < period_end:
                 rejected_rows += 1
                 continue
