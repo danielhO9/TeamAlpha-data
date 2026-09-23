@@ -89,6 +89,31 @@ def test_failed_ingestion_does_not_advance_reference_watermark(monkeypatch):
         assert prep.call_args.args[1]['as_of']=='2026-08-10'
 
 
+@pytest.mark.parametrize('day,through,excluded,expected_start,expected_end', [
+    ('20260921', '2026-09-18', [], date(2026,9,15), date(2026,9,21)),
+    ('20260920', '2026-09-18', [], date(2026,9,14), date(2026,9,18)),
+    ('20260921', '2026-09-01', ['2026-09-17'], date(2026,9,2), date(2026,9,21)),
+])
+def test_daily_non_session_bounds_preserve_recovery_window(
+        monkeypatch, day, through, excluded, expected_start, expected_end):
+    for name,value in {'KIS_BRONZE_ROOT':'root','KIS_UNIVERSE_URI':'manifest','KIS_POLICY_URI':'policy','KIS_DAILY_REFERENCE_URI':'checkpoint'}.items():
+        monkeypatch.setenv(name,value)
+    manifest=dict(as_of='2026-08-10',asset_ids=[1]); manifest['sha256']=digest(manifest)
+    p=policy(); p['calendar_exclusions']=[{'date':d,'evidence':'test-calendar-notice'} for d in excluded]
+    with patch.object(k,'read_json',side_effect=[manifest,p,{'through':through}]), \
+         patch.object(daily,'prepare',return_value=('current','state',{'through':day})) as prep, \
+         patch.object(k,'run',return_value={'failures':[]}) as run, \
+         patch.object(daily,'verify_collection',return_value={'missing':0}), \
+         patch.object(daily,'_freeze'), patch.object(k,'Client'), \
+         patch.object(daily,'write_text') as write:
+        result=daily.daily(day,conn=Mock())
+    assert result['status']=='PASS'
+    assert run.call_args.kwargs['start']==expected_start
+    assert run.call_args.kwargs['end']==expected_end
+    assert not set(excluded) & {str(d) for d in prep.call_args.args[3]}
+    write.assert_called_once()
+
+
 def test_equal_row_count_with_wrong_day_is_not_accepted():
     conn=MagicMock(); cur=conn.cursor.return_value.__enter__.return_value
     rows=[(1,D,'J','investor',None),(1,D,'J','short','VALID'),(1,date(2026,9,16),'UN','investor',None)]

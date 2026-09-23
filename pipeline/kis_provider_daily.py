@@ -263,7 +263,11 @@ def daily(day, *, conn):
     lower = min(target-timedelta(days=30), through)
     calendar = xcals.get_calendar('XKRX', start=str(lower), end=str(target+timedelta(days=7)))
     closed = {r['date'] for r in policy.get('calendar_exclusions', [])}
-    available = [v.date() for v in calendar.sessions_in_range(str(lower), str(target)) if str(v.date()) not in closed]
+    # Bounds can be holidays/weekends, outside the first/last session of the
+    # requested calendar. Filter the loaded sessions without parsing those
+    # non-session bounds through sessions_in_range (which raises DateOutOfBounds).
+    available = [v.date() for v in calendar.sessions
+                 if lower <= v.date() <= target and str(v.date()) not in closed]
     if len(available) < 5: raise ValueError('five market sessions required')
     sessions = [d for d in available if d >= min(available[-5], through + timedelta(days=1))]
     client = k.Client(root)
