@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from unittest.mock import MagicMock, patch
 
 from pipeline.silver import (
     alternative_data,
@@ -116,6 +117,27 @@ def test_ownership_transform_is_next_day_pit(
     assert frame.iloc[0]["available_date"] == date(2026, 9, 1)
     for column, value in expected.items():
         assert frame.iloc[0][column] == value
+
+
+@pytest.mark.parametrize('change', [{}, {'corp_name':'New name'}, {'sp_stock_lmp_cnt':'200'}])
+def test_ownership_replay_preserves_history_and_rejects_material_change(tmp_path, change):
+    old = dict(corp_code='00126380', corp_name='Old name',
+               rcept_no='20260831000001', repror='Reporter', sp_stock_lmp_cnt='100')
+    uri = _write_json(tmp_path / (
+        'ownership/dart/disclosure_type=EXECUTIVE_MAJOR_SHAREHOLDER/corp=005930/'
+        f"sha256={'b' * 64}/response.json"), {'list':[{**old, **change}]})
+    frame, _ = ownership.prepare(files=[uri])
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchall.return_value = [
+        (1,'DART','EXECUTIVE_MAJOR_SHAREHOLDER','20260831000001','Reporter',old)]
+    with patch.object(ownership.db, 'upsert', return_value=0) as upsert:
+        if 'sp_stock_lmp_cnt' in change:
+            with pytest.raises(ValueError, match='review required'):
+                ownership.publish(conn, frame, {'00126380':1}, 'run')
+            upsert.assert_not_called()
+        else:
+            assert ownership.publish(conn, frame, {'00126380':1}, 'run') == 0
+            assert upsert.call_args.args[3] == []
 
 
 def _write_authorized_flow(tmp_path: Path, frame: pd.DataFrame) -> str:

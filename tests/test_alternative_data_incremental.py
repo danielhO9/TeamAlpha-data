@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from pipeline import alternative_data_incremental as incremental
 
@@ -55,6 +56,37 @@ def test_incremental_publishes_only_changed_and_unseen_sources(monkeypatch):
     assert captured["short_balance_files"] == ["s3://bronze/short-new.csv"]
     assert result["changed_files"]["full_statements"] == 1
     assert "s3://bronze/short-new.csv" in json.loads(objects[state_uri])["krx_files"]
+
+
+def test_failed_publish_reuses_pending_inputs_without_provider_calls(monkeypatch):
+    monkeypatch.setenv('S3_BRONZE_BUCKET', 'bronze')
+    objects = {}
+    monkeypatch.setattr(incremental, 'read_bytes', lambda uri: objects.get(uri))
+    monkeypatch.setattr(incremental, 'write_text_if_changed',
+                        lambda text, uri: objects.__setitem__(uri, text.encode()))
+    calls = []
+    def collect(*args, **kwargs):
+        calls.append(args)
+        return ['s3://bronze/immutable.json']
+    monkeypatch.setattr(incremental.dart_full_statements, 'run_incremental_day', collect)
+    monkeypatch.setattr(incremental.dart_ownership, 'run_incremental', collect)
+    monkeypatch.setattr(incremental.dart_company_profiles, 'run_incremental', collect)
+    monkeypatch.setattr(incremental, '_list_authorized_sources', lambda *a: [])
+    def fail(**kwargs):
+        raise RuntimeError('publish failed')
+    monkeypatch.setattr(incremental.alternative_data, 'publish_files', fail)
+    with pytest.raises(RuntimeError, match='publish failed'):
+        incremental.run('20260922', conn=object())
+    assert incremental._day_uri('20260922') not in objects
+    captured = {}
+    def publish(**kwargs):
+        captured.update(kwargs)
+        return {'published': {}}
+    monkeypatch.setattr(incremental.alternative_data, 'publish_files', publish)
+    incremental.run('20260922', conn=object())
+    assert len(calls) == 3
+    assert captured['ownership_files'] == ['s3://bronze/immutable.json']
+    assert captured['full_statement_files'] == ['s3://bronze/immutable.json']
 
 
 def test_completed_increment_skips_all_collection(monkeypatch):

@@ -189,9 +189,34 @@ def publish(conn, frame: pd.DataFrame, asset_map: dict[str, int], run_id) -> int
         "control_shares", "control_pct", "event_key", "raw_row", "quality_run_id",
     ]
     rows = []
+    # A provider snapshot can rename corp_name on historical receipts. Preserve
+    # the already published PIT row when that is the only change; substantive
+    # revisions require review, not an overwrite of historical observations.
+    existing = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT asset_id, source, disclosure_type, filing_id, reporter, raw_row "
+            "FROM ownership_disclosure_event "
+            "WHERE asset_id = ANY(%s) AND filing_id = ANY(%s)",
+            (sorted({asset_map[str(v)] for v in frame['natural_key']}),
+             sorted(set(frame['filing_id']))),
+        )
+        existing = {tuple(row[:5]): row[5] for row in cur.fetchall()}
     for row in frame.itertuples(index=False):
         values = row._asdict()
         values["asset_id"] = asset_map[str(row.natural_key)]
+        business_key = tuple(values[key] for key in (
+            'asset_id', 'source', 'disclosure_type', 'filing_id', 'reporter',
+        ))
+        prior = existing.get(business_key)
+        if prior is not None:
+            comparable = lambda raw: {k: v for k, v in raw.items() if k != 'corp_name'}
+            if comparable(prior) != comparable(row.raw_row):
+                raise ValueError(
+                    'ownership historical receipt changed; review required: '
+                    f'{business_key}'
+                )
+            continue
         values["raw_row"] = Jsonb(row.raw_row)
         values["quality_run_id"] = run_id
         rows.append(tuple(values[column] for column in columns))

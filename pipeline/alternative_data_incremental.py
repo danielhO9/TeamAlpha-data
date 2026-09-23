@@ -66,6 +66,20 @@ def _day_uri(day: str) -> str:
     return f"{base_uri('s3')}/{DAY_ROOT}/date={rendered}/complete.json"
 
 
+def _collect_once(day: str, name: str, collect) -> list[str]:
+    """Retain collected immutable inputs until Silver publication succeeds."""
+    uri = _day_uri(day).replace('/complete.json', f'/pending-{name}.json')
+    prior = read_bytes(uri)
+    if prior is not None:
+        payload = json.loads(prior.decode('utf-8'))
+        if payload.get('day') != day or not isinstance(payload.get('files'), list):
+            raise RuntimeError(f'invalid alternative pending manifest: {name}')
+        return payload['files']
+    files = sorted(set(collect()))
+    write_text_if_changed(json.dumps({'day': day, 'files': files}, sort_keys=True), uri)
+    return files
+
+
 def run(day: str, *, conn, industry_shards: int | None = None) -> dict:
     """Run a retry-safe alternative-data increment for one pipeline date."""
     datetime.strptime(day, "%Y%m%d")
@@ -80,11 +94,13 @@ def run(day: str, *, conn, industry_shards: int | None = None) -> dict:
     shards = industry_shards or int(
         os.environ.get("DART_INDUSTRY_SHARDS", "20")
     )
-    full_files = dart_full_statements.run_incremental_day(day, "s3")
-    ownership_files = dart_ownership.run_incremental(day, "s3")
-    industry_files = dart_company_profiles.run_incremental(
-        day, "s3", shard_count=shards,
-    )
+    full_files = _collect_once(day, 'full-statements',
+                              lambda: dart_full_statements.run_incremental_day(day, 's3'))
+    ownership_files = _collect_once(day, 'ownership',
+                                   lambda: dart_ownership.run_incremental(day, 's3'))
+    industry_files = _collect_once(day, 'industry',
+                                  lambda: dart_company_profiles.run_incremental(
+                                      day, 's3', shard_count=shards))
 
     state = _read_state()
     known_krx = set(state["krx_files"])
