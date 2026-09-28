@@ -36,3 +36,11 @@ Corrected task: `b95f4fa38fae42479248b9788c4a9a0d`, definition `teamalpha-data-t
 Script archive: `s3://soma-quant-bronze-31-159372032315-ap-northeast-2-an/ops/recovery/20260928/recover_kis.py`.
 
 Log group `/ecs/teamalpha-data-daily-full`; stream `ecs/teamalpha-data-daily-full/b95f4fa38fae42479248b9788c4a9a0d`.
+
+## Verified KIS completion (2026-09-28 10:12 KST)
+
+- 5,548 planned partitions: 5,340 successful checkpoints skipped, only 208 processed, zero failures.
+- Collection work ran from 01:11:56 to 01:12:30 UTC (approximately 34 seconds after context/inventory preparation).
+- Final coverage: expected 40,101; actual 40,101; missing, unexpected, duplicate and invalid-ratio counts all zero.
+- KIS reference advanced through September 23 only after verification.
+- Gold September 23 started at 01:12:35 UTC. Gold/FMP downstream completion is not yet claimed by this record.
