@@ -7,6 +7,8 @@ import math
 import os
 import threading
 import time
+from concurrent.futures import Future
+from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 
 import requests
@@ -57,7 +59,7 @@ class RequestGate:
     def retry(self, code, delay):
         with self.lock:
             self.retries[code] = self.retries.get(code, 0) + 1
-            if code == 'EGW00201':
+            if code in {'EGW00201', 'OPSQ1002'}:
                 self.blocked_until = max(self.blocked_until, time.monotonic() + delay)
 
     def metrics(self):
@@ -72,6 +74,8 @@ class Client:
         self._session = session
         self._local = threading.local()
         self._token_lock = threading.Lock()
+        self._history_lock = threading.Lock()
+        self._histories = OrderedDict()
         self.token = token
         self._next_token_attempt = 0.0
         self.token_issued_at = time.monotonic() if token else None
@@ -194,6 +198,26 @@ class Client:
         return normalized, receipt
 
     def history(self, kind, ticker, venue, start, end):
+        # Coalesce identical J/derived-UN reads within this run, never across
+        # runs: a provider may deliver missing dates later.
+        key = (kind, ticker, venue, start, end)
+        with self._history_lock:
+            owner = key not in self._histories
+            future = self._histories.setdefault(key, Future())
+        if owner:
+            try:
+                future.set_result(self._history(kind, ticker, venue, start, end))
+            except BaseException as exc:
+                future.set_exception(exc)
+            with self._history_lock:
+                for old_key in list(self._histories):
+                    if len(self._histories) <= 128:
+                        break
+                    if self._histories[old_key].done():
+                        del self._histories[old_key]
+        return future.result()
+
+    def _history(self, kind, ticker, venue, start, end):
         cursor = end
         found = {}
         receipts = []

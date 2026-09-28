@@ -9,6 +9,12 @@ from tests.kis.test_history import flow
 
 D = date(2026, 9, 17)
 
+
+@pytest.fixture(autouse=True)
+def isolate_pending_storage(monkeypatch):
+    monkeypatch.setattr(daily, '_read_pending', lambda uri: None)
+    monkeypatch.setattr(daily, '_write_pending', lambda uri, payload: None)
+
 def policy():
     return dict(version='trusted-v1', availability_lag_calendar_days=1, availability_hour_kst=8,
                 short_market='KRX', short_market_basis='PROVIDER_TRUST', provider_trust_evidence='s3://approval',
@@ -112,6 +118,29 @@ def test_daily_non_session_bounds_preserve_recovery_window(
     assert run.call_args.kwargs['end']==expected_end
     assert not set(excluded) & {str(d) for d in prep.call_args.args[3]}
     write.assert_called_once()
+
+
+def test_failed_daily_reuses_manifest_and_certified_checkpoints(monkeypatch):
+    for name,value in {'KIS_BRONZE_ROOT':'root','KIS_UNIVERSE_URI':'manifest','KIS_POLICY_URI':'policy','KIS_DAILY_REFERENCE_URI':'checkpoint'}.items():
+        monkeypatch.setenv(name,value)
+    stored={}
+    monkeypatch.setattr(daily,'_read_pending',lambda uri:stored.get(uri))
+    monkeypatch.setattr(daily,'_write_pending',lambda uri,payload:stored.__setitem__(uri,payload))
+    manifest=dict(as_of='2026-08-10',asset_ids=[1]);manifest['sha256']=digest(manifest)
+    source={'manifest':manifest,'policy':policy(),'checkpoint':{'through':'2026-09-16'}}
+    with patch.object(k,'read_json',side_effect=lambda uri:source[uri]), \
+         patch.object(daily,'prepare',return_value=('current','state',{'through':'2026-09-23'})) as prep, \
+         patch.object(k,'run',side_effect=[{'failures':[{'error':'delayed'}]}, {'failures':[]}]) as run, \
+         patch.object(daily,'verify_collection',return_value={'missing':0}), \
+         patch.object(daily,'_freeze'),patch.object(k,'Client'),patch.object(daily,'write_text') as write:
+        with pytest.raises(RuntimeError,match='incomplete'):
+            daily.daily('20260923',conn=Mock())
+        write.assert_not_called()
+        # Holiday target shares the same requested sessions and immutable context.
+        assert daily.daily('20260924',conn=Mock())['status']=='PASS'
+        assert prep.call_count==1
+        assert all(not call.kwargs['refresh'] for call in run.call_args_list)
+        write.assert_called_once()
 
 
 def test_equal_row_count_with_wrong_day_is_not_accepted():

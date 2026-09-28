@@ -304,6 +304,7 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
                 entries.append(('UN',ineligible,'KRX_ONLY'))
         plans.extend((aid,ticker,venue,vd,mode) for venue,vd,mode in entries)
     completed = _checkpoint_keys(root) if publish and not refresh else set()
+    print(f'[kis-history] plans={len(plans)} resume={publish and not refresh} workers={workers}', flush=True)
     def pending_plans():
         for plan in plans:
             aid,ticker,venue,vd,mode=plan
@@ -315,6 +316,7 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
                 summary['skipped_partitions']+=1
                 continue
             yield plan,key,checkpoint
+    processed = 0
     for (plan,key,checkpoint),future in _prefetch(pending_plans(),
             lambda item: _collect_plan(client,manifest,policy,item[0]), workers):
         aid,ticker,venue,vd,mode=plan
@@ -335,6 +337,10 @@ def run(*, conn, manifest_uri, policy_uri, root, start, end, publish=False, refr
                                   CheckStatus.FAIL,'complete matched source window',str(exc),1)
                 repository.finish_run(conn,ctx,'FAILED',[check],error_message=str(exc))
             write_text(json.dumps(failure),f'{root}/market_flows/kis_history/failures/{key}.json')
+        processed += 1
+        if processed % 100 == 0:
+            print(f"[kis-history] processed={processed} skipped={summary['skipped_partitions']} failures={len(summary['failures'])}", flush=True)
+    print(f"[kis-history] complete processed={processed} skipped={summary['skipped_partitions']} failures={len(summary['failures'])}", flush=True)
     write_text(json.dumps(summary,sort_keys=True),f'{root}/market_flows/kis_history/runs/{datetime.now().isoformat()}.json')
     return summary
 

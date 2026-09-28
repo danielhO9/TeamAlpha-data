@@ -170,7 +170,7 @@ def _request(
         if response.status_code == 200 and str(payload.get("rt_cd")) == "0":
             break
         if (
-            payload.get("msg_cd") in {"EGW00201", "EGW00316"}
+            payload.get("msg_cd") in {"EGW00201", "EGW00316", "OPSQ1002"}
             and attempt < RATE_LIMIT_RETRIES
         ):
             delay = REQUEST_INTERVAL_SECONDS * 2 ** attempt

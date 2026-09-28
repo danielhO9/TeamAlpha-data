@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 import requests
 
 from pipeline.bronze.kis_history import digest
-from pipeline.common.sink import write_text
+from pipeline.common.sink import write_text, read_bytes
 from pipeline.silver import asset_lifecycle
 
 
@@ -246,6 +246,15 @@ def verify_collection(conn, manifest_uri, policy, sessions):
     return result
 
 
+def _read_pending(uri):
+    raw = read_bytes(uri)
+    return json.loads(raw) if raw else None
+
+
+def _write_pending(uri, payload):
+    write_text(json.dumps(payload, sort_keys=True), uri)
+
+
 def daily(day, *, conn):
     from pipeline import kis_flows as k
     target = datetime.strptime(day, '%Y%m%d').date()
@@ -271,9 +280,23 @@ def daily(day, *, conn):
     if len(available) < 5: raise ValueError('five market sessions required')
     sessions = [d for d in available if d >= min(available[-5], through + timedelta(days=1))]
     client = k.Client(root)
-    manifest_uri, state_uri, pending_state = prepare(conn, manifest, policy, sessions, root, os.environ['KIS_DAILY_REFERENCE_URI'], client=client)
+    identity = dict(sessions=[str(d) for d in sessions], universe=manifest['sha256'],
+                    policy=digest(policy), reference=digest(state))
+    pending_uri = f'{root}/daily_references/pending/{digest(identity)}.json'
+    pending = _read_pending(pending_uri)
+    if pending is None:
+        manifest_uri, state_uri, pending_state = prepare(conn, manifest, policy, sessions, root, os.environ['KIS_DAILY_REFERENCE_URI'], client=client)
+        pending = dict(identity=identity, manifest_uri=manifest_uri,
+                       state_uri=state_uri, pending_state=pending_state)
+        _write_pending(pending_uri, pending)
+    else:
+        if pending.get('identity') != identity:
+            raise ValueError('KIS pending reference identity mismatch')
+        manifest_uri, state_uri, pending_state = (
+            pending['manifest_uri'], pending['state_uri'], pending['pending_state'])
+        print('[kis-daily] resuming captured window; certified partitions skipped', flush=True)
     result = k.run(conn=conn, manifest_uri=manifest_uri, policy_uri=os.environ['KIS_POLICY_URI'],
-                   root=root, start=min(sessions), end=max(sessions), publish=True, refresh=True, client=client)
+                   root=root, start=min(sessions), end=max(sessions), publish=True, refresh=False, client=client)
     result.update(reference_state_uri=state_uri, watchlist_source_as_of=manifest['as_of'],
                   market_scope_basis='PROVIDER_TRUST', krx_external_verification_required=False)
     _freeze(root, 'daily_results', result)

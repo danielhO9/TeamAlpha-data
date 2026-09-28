@@ -38,7 +38,7 @@ def test_invalid_or_over_quota_rate_rejected(interval):
     with pytest.raises(ValueError): history.RequestGate(interval)
 
 
-@pytest.mark.parametrize('error', ['EGW00201', 'EGW00316', 'NETWORK'])
+@pytest.mark.parametrize('error', ['EGW00201', 'EGW00316', 'OPSQ1002', 'NETWORK'])
 def test_every_retry_acquires_permit_and_is_bounded(monkeypatch, error):
     monkeypatch.setenv('KIS_APP_KEY', 'test-key')
     monkeypatch.setenv('KIS_APP_SECRET', 'test-secret')
@@ -76,6 +76,29 @@ def test_concurrent_pages_share_one_token_and_preserve_raw(tmp_path, monkeypatch
     assert all(not data for data, receipt in rows)
     for _, receipt in rows:
         assert history.read_bytes(receipt['raw_uri']) == b'{"output2":[]}'
+
+
+def test_identical_history_reads_share_result_only_within_client(tmp_path, monkeypatch):
+    calls = []
+    day = date(2026,9,23)
+    def fetch(self, *args):
+        calls.append(args)
+        return {day: {'acml_vol':'0'}}, [{'raw_uri':'raw'}]
+    monkeypatch.setattr(history.Client, '_history', fetch)
+    client = history.Client(str(tmp_path), token='test')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results=list(pool.map(lambda _: client.history('investor','008600','J',day,day),range(16)))
+    assert len(calls)==1 and all(r==results[0] for r in results)
+    history.Client(str(tmp_path), token='test').history('investor','008600','J',day,day)
+    assert len(calls)==2
+
+
+def test_history_cache_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(history.Client, '_history', lambda *args: ({}, []))
+    client=history.Client(str(tmp_path),token='test')
+    for n in range(300):
+        client.history('investor',f'{n:06d}','J',date(2026,9,1),date(2026,9,2))
+    assert len(client._histories)<=128
 
 
 def test_prefetch_overlaps_bounds_memory_and_surfaces_failure_in_order():
