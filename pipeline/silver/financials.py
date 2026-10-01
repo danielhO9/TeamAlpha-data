@@ -780,7 +780,10 @@ def prepare(
             df = df[~bad_mask].reset_index(drop=True)
             excluded_rows += implausible_value_rows
 
+    from pipeline.silver.reviewed_financial_units import correct_candidates
+    df, unit_repairs = correct_candidates(df)
     return df, {
+        "reviewed_unit_repairs": unit_repairs,
         "input_rows": input_rows,
         "transformed_rows": len(df),
         "excluded_rows": excluded_rows,

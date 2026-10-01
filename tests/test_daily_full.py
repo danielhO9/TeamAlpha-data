@@ -54,6 +54,7 @@ def test_daily_requires_v3_disclosure_manifest_and_rejects_v1():
 
 
 def _stub_main(monkeypatch, *, events: list[str]) -> None:
+    monkeypatch.setattr(daily_full.fx_rates, "run", lambda *a, **kw: 0)
     monkeypatch.setattr(daily_full.fmp_macro, "run_daily", lambda *a: {})
     monkeypatch.setattr(daily_full.fmp_external, "run_daily", lambda *a: {})
     monkeypatch.setattr(daily_full.fmp_regime, "run_daily", lambda *a: {})

@@ -224,9 +224,18 @@ WITH target_assets AS (
         'retained_earnings','revenue','operating_income','net_income','pretax_income'
       )
     GROUP BY f.asset_id
+), fx_events AS (
+    -- Foreign financial amounts change KRW value with each completed FX close.
+    -- Include daily states so normalization does not freeze at the filing date.
+    SELECT p.asset_id,p.trade_date AS state_date
+    FROM _gold_price_base p
+    WHERE EXISTS (SELECT 1 FROM public.fundamental f
+      WHERE f.asset_id=p.asset_id AND f.source='DART' AND f.currency<>'KRW'
+        AND f.available_date<=p.trade_date)
 ), events AS (
     SELECT * FROM relevant_events
     UNION SELECT * FROM prior_events
+    UNION SELECT * FROM fx_events
 ), intervals AS (
     SELECT asset_id, state_date,
            lead(state_date) OVER (PARTITION BY asset_id ORDER BY state_date) AS next_state_date
@@ -245,7 +254,8 @@ LEFT JOIN LATERAL (
       max(value) FILTER (WHERE metric='noncurrent_assets') AS noncurrent_assets,
       max(value) FILTER (WHERE metric='retained_earnings') AS retained_earnings
     FROM (
-      SELECT DISTINCT ON (f.metric) f.metric, f.value::double precision AS value
+      SELECT DISTINCT ON (f.metric) f.metric,
+        (f.value * public.factor_fx_rate(f.currency,i.state_date))::double precision AS value
       FROM public.fundamental f
       JOIN public.dq_run q ON q.run_id=f.quality_run_id AND q.status='CERTIFIED'
       WHERE f.asset_id=i.asset_id AND f.available_date<=i.state_date
@@ -262,7 +272,8 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
   WITH selected AS (
     SELECT DISTINCT ON (f.metric,f.period_end,f.fiscal_period)
-      f.metric,f.period_end,f.fiscal_period,f.value::double precision AS value
+      f.metric,f.period_end,f.fiscal_period,
+      (f.value * public.factor_fx_rate(f.currency,i.state_date))::double precision AS value
     FROM public.fundamental f
     JOIN public.dq_run q ON q.run_id=f.quality_run_id AND q.status='CERTIFIED'
     WHERE f.asset_id=i.asset_id AND f.available_date<=i.state_date
@@ -291,6 +302,7 @@ LEFT JOIN LATERAL (
       SELECT 1 FROM direct_quarters d
       WHERE d.metric=fq.metric AND d.period_end=fq.fy_end AND d.fiscal_period='Q4')
     GROUP BY metric,fy_end HAVING count(DISTINCT fiscal_period)=3
+      AND count(value)=3 AND count(fy_value)=3
   ), quarters AS (
     SELECT * FROM direct_quarters UNION ALL SELECT * FROM derived_q4
   ), unique_periods AS (
@@ -301,7 +313,7 @@ LEFT JOIN LATERAL (
     FROM unique_periods WHERE period_rank=1
   ), ttm AS (
     SELECT metric,sum(value) AS value FROM recent WHERE recent_rank<=4
-    GROUP BY metric HAVING count(*)=4 AND max(period_end)-min(period_end)<=370
+    GROUP BY metric HAVING count(*)=4 AND count(value)=4 AND max(period_end)-min(period_end)<=370
   )
   SELECT
     max(value) FILTER (WHERE metric='revenue') AS revenue_ttm,

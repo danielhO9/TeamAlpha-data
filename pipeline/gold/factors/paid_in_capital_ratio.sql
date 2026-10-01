@@ -49,7 +49,8 @@ WITH certified_prices AS (
 ), revisions AS (
     SELECT
         u.asset_id, u.as_of_date, u.signal_date,
-        f.period_end, f.fiscal_period, f.metric, f.value,
+        f.period_end, f.fiscal_period, f.metric,
+        f.value * public.factor_fx_rate(f.currency,u.as_of_date) AS value,
         f.fs_type, f.available_date, f.revision_key,
         row_number() OVER (
             PARTITION BY

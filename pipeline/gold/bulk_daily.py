@@ -333,6 +333,7 @@ def run_shared_backfill(
     start_date: date | str,
     end_date: date | str,
     apply: bool,
+    factor_rows: list[tuple[int, str, int]] | None = None,
 ) -> int:
     """Build the expensive history panel once, then commit yearly outputs."""
     start = _parse_date(start_date)
@@ -344,7 +345,7 @@ def run_shared_backfill(
     full_params = {"start_date": start, "end_date": end}
 
     with conn.transaction():
-        factor_rows = _load_factor_ids(conn)
+        factor_rows = _load_factor_ids(conn) if factor_rows is None else factor_rows
         with conn.cursor() as cur:
             _configure_session(cur)
             _create_factor_ids(cur, factor_rows, preserve=True)

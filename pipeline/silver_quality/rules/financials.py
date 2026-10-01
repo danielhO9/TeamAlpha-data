@@ -82,6 +82,14 @@ def check_financials(
     ))
 
     value_num = pd.to_numeric(df["value"], errors="coerce")
+    # Review gate, not a cap: no value is fabricated or silently truncated.
+    scale_bad = df[df["source"].eq("DART") & df["currency"].eq("KRW")
+                   & df["metric"].eq("total_assets") & value_num.abs().gt(1e16)]
+    checks.append(result(
+        "FUNDAMENTAL_SCALE_REVIEW_REQUIRED", "fundamental", Severity.ERROR,
+        scale_bad, "KRW total assets above 10 quadrillion require source-document review",
+        partition_key=partition_key,
+    ))
     implausible = df[
         (df["metric"].isin({"total_assets"}) & value_num.le(0))
         | (df["metric"].isin({"revenue", "total_liabilities"}) & value_num.lt(0))

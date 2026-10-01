@@ -149,6 +149,7 @@ def test_daily_fails_on_missing_or_stale_series(monkeypatch):
 
 def test_certified_equity_batch_does_not_skip_regime(monkeypatch):
     from pipeline import daily_full as daily
+    monkeypatch.setattr(daily.fx_rates, "run", lambda *a, **kw: 0)
     calls=[]
     monkeypatch.setattr(daily.dart_silver_backfill_ecs,'assert_daily_certification_lock',lambda c:None)
     monkeypatch.setattr(daily.repository,'certified_target_exists',lambda *a:True)

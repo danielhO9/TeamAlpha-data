@@ -28,7 +28,7 @@ from pipeline.bronze import (
 from pipeline.common.paths import base_uri, ymd_to_dash
 from pipeline.gold import run as gold_run
 from pipeline.silver import load
-from pipeline.silver import fmp_load
+from pipeline.silver import fmp_load, fx_rates
 from pipeline.silver.dart_action_snapshot import DEFAULT_COVERAGE_START
 from pipeline.silver_quality import freshness, migrate, repository
 
@@ -689,6 +689,9 @@ def _run_fmp_incremental(
     fmp_macro.run_daily(krx_day)
     fmp_external.run_daily(krx_day)
     fmp_regime.run_daily(fmp_day)
+    # Financial factors require every observed reporting currency, independently
+    # of whether the older stock/FMP batch was already certified.
+    fx_rates.run(parsed_fmp_day-timedelta(days=7), parsed_fmp_day, apply=True, dest="s3")
     if repository.certified_target_exists(
         certification_lock, "fmp_daily", parsed_fmp_day,
     ):

@@ -3,28 +3,28 @@
     "frequency": "daily",
     "lookback": "point_in_time",
     "predicted_sign": 1,
-    "research_definition_hash": "a2beb9612e545f86",
+    "research_definition_hash": "5d5c8d5f5d6775f4",
     "sql": "pipeline/gold/factors/market_leverage.sql",
     "value_contract": "raw_value_direction_adjusted_rank_v1",
-    "version": 3
+    "version": 4
   },
   "operating_return_on_capital_employed": {
     "frequency": "daily",
     "lookback": "point_in_time_ttm",
     "predicted_sign": 1,
-    "research_definition_hash": "98134a4587d2347f",
+    "research_definition_hash": "b9009057acf1c58c",
     "sql": "pipeline/gold/factors/operating_return_on_capital_employed.sql",
     "value_contract": "raw_value_direction_adjusted_rank_v1",
-    "version": 3
+    "version": 4
   },
   "paid_in_capital_ratio": {
     "frequency": "daily",
     "lookback": "point_in_time",
     "predicted_sign": -1,
-    "research_definition_hash": "93e9784d7c72d63c",
+    "research_definition_hash": "0972a0b79c6a45ec",
     "sql": "pipeline/gold/factors/paid_in_capital_ratio.sql",
     "value_contract": "raw_value_direction_adjusted_rank_v1",
-    "version": 3
+    "version": 4
   },
   "trading_turnover_20d": {
     "frequency": "daily",

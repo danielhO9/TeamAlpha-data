@@ -205,6 +205,7 @@ def test_daily_uses_korean_processing_day_and_overlap(monkeypatch):
 
 def test_daily_collection_runs_even_when_equities_already_certified(monkeypatch):
     from pipeline import daily_full as d
+    monkeypatch.setattr(d.fx_rates, "run", lambda *a, **kw: 0)
     calls = []
     monkeypatch.setattr(d.dart_silver_backfill_ecs, "assert_daily_certification_lock", lambda c: None)
     monkeypatch.setattr(d.repository, "certified_target_exists", lambda *a: True)

@@ -51,7 +51,11 @@ WITH certified_prices AS (
     -- A factor value changes only when one of its three source metrics gets a
     -- newly available filing.  Collapse repeated month-ends onto that PIT
     -- state before replaying the comparatively expensive financial history.
-    SELECT u.*, state.available_date AS state_date
+    SELECT u.*, CASE WHEN EXISTS (
+        SELECT 1 FROM public.fundamental foreign_f
+        WHERE foreign_f.asset_id=u.asset_id AND foreign_f.source='DART'
+          AND foreign_f.currency<>'KRW' AND foreign_f.available_date<=u.as_of_date
+    ) THEN u.as_of_date ELSE state.available_date END AS state_date
     FROM universe u
     JOIN LATERAL (
         SELECT max(f.available_date) AS available_date
@@ -79,7 +83,7 @@ WITH certified_prices AS (
             / (ta.total_assets - cl.current_liabilities) AS value
     FROM states s
     JOIN LATERAL (
-        SELECT f.value::double precision AS total_assets
+        SELECT (f.value * public.factor_fx_rate(f.currency,s.state_date))::double precision AS total_assets
         FROM public.fundamental f
         JOIN public.dq_run q
           ON q.run_id = f.quality_run_id
@@ -103,7 +107,7 @@ WITH certified_prices AS (
         LIMIT 1
     ) ta ON true
     JOIN LATERAL (
-        SELECT f.value::double precision AS current_liabilities
+        SELECT (f.value * public.factor_fx_rate(f.currency,s.state_date))::double precision AS current_liabilities
         FROM public.fundamental f
         JOIN public.dq_run q
           ON q.run_id = f.quality_run_id
@@ -129,7 +133,8 @@ WITH certified_prices AS (
     JOIN LATERAL (
         WITH candidates AS (
             SELECT
-                f.period_end, f.fiscal_period, f.value::double precision AS value,
+                f.period_end, f.fiscal_period,
+                (f.value * public.factor_fx_rate(f.currency,s.state_date))::double precision AS value,
                 row_number() OVER (
                     PARTITION BY f.period_end, f.fiscal_period
                     ORDER BY
@@ -193,6 +198,7 @@ WITH certified_prices AS (
               )
             GROUP BY q.fy_end
             HAVING count(DISTINCT q.fiscal_period) = 3
+               AND count(q.quarter_value) = 3 AND count(q.fy_value) = 3
         ), standalone_candidates AS (
             SELECT * FROM direct_quarters
             UNION ALL
@@ -218,7 +224,7 @@ WITH certified_prices AS (
         SELECT sum(value)::double precision AS operating_income_ttm
         FROM recent
         WHERE recent_rank <= 4
-        HAVING count(*) = 4
+        HAVING count(*) = 4 AND count(value) = 4
            AND max(period_end) - min(period_end) <= 370
     ) oi ON true
     WHERE ta.total_assets - cl.current_liabilities > 0
