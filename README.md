@@ -38,6 +38,14 @@ KRX OpenAPI / OpenDART / marcap / FMP stable API
   source-aware 품질 게이트를 통과한 데이터만 publish합니다.
 - **gold**: 팩터 정의·버전·평가와 종목별 값·순위, 팩터 간 상관관계를 저장합니다.
   레거시 12-1 모멘텀과 여섯 연구 후보 계산 SQL이 있으며, 임시 모멘텀 값은 제거된 상태입니다.
+  새 현상 연구의 레퍼런스 측정치는 별도 `gold.reference_*` 테이블에 저장하며,
+  [레퍼런스 라이브러리 계약](docs/reference-library-v1.md)을 따릅니다. 측정치 적재는 알파 승인이 아닙니다.
+  2026-10-16 입고 재검증 기준 **108개 측정치·27,754,980행·66개 불변 dataset**을 확인했습니다.
+  실제 Gold 전 행 대조와 수익률 비사용 입고 평가를 완료했습니다.
+  [입고 확정 보고서](https://github.com/2stshine/factor-research/blob/main/docs/reference-admission-status-20261016.md)를 참고하세요.
+  실제 사용 목록은 factor-research의 `research/phenomena/program.json`에서 확인합니다.
+  `PIT_ASSUMED`이고 최초 발표 빈티지는 미입증입니다.
+  **2026-09 월말 기준 일회성 스냅샷**이며 일일 갱신 배포가 아닙니다. 기존 레거시 연구·Gold는 보존합니다.
 - **운영 스케줄**: 화~토 오전 08:30 KST cron을 사용합니다. 전체 복구 작업 중에는
   Scheduler를 일시 중지할 수 있지만, 정상 배포는 새 daily target을 등록한 뒤
   Scheduler를 `ENABLED`로 복원합니다.
