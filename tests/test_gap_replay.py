@@ -1,4 +1,5 @@
 import os
+from unittest.mock import MagicMock
 from datetime import date
 
 import pytest
@@ -224,3 +225,31 @@ def test_building_resume_rejects_reprocessing_or_skipping_raw_sessions(first):
 def test_building_resume_accepts_deferred_september_production_horizons():
     report = {**_building_report("2026-09-11"), "last_certified_trade": "2026-09-14"}
     gap_replay._validate_building_resume(report, date(2026, 9, 14), date(2026, 9, 15))
+
+
+@pytest.mark.parametrize('mutation,accepted', [
+    ({}, True), ({0: 'OTHER_INVALIDATION'}, False),
+    ({1: None}, False), ({2: 'FAILED'}, False),
+    ({3: 'fmp_daily'}, False), ({4: date(2026, 8, 10)}, False),
+])
+def test_observed_action_resume_requires_exact_retained_source_proof(mutation, accepted):
+    report = {**_building_report(), 'quality_run_id': None,
+              'dq_status': None, 'dq_mode': None}
+    row = ['DART_BRONZE_ACTION_CHANGE_OBSERVED_BEFORE_PUBLICATION:2026-08-12',
+           'retained-source-run', 'CERTIFIED', 'daily', date(2026, 8, 11)]
+    for index, value in mutation.items():
+        row[index] = value
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = row
+    proof = gap_replay._observed_action_resume_proof(
+        conn, report, date(2026, 8, 11), date(2026, 8, 12))
+    assert proof is accepted
+    if accepted:
+        gap_replay._validate_building_resume(
+            report, date(2026, 8, 11), date(2026, 8, 12), observed_action_proof=proof)
+        assert report['quality_run_id'] is None
+        assert report['status'] == 'BUILDING'
+    else:
+        with pytest.raises(RuntimeError, match='cannot safely resume'):
+            gap_replay._validate_building_resume(
+                report, date(2026, 8, 11), date(2026, 8, 12), observed_action_proof=proof)

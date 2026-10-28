@@ -26,7 +26,33 @@ def _weekdays(from_day: str, to_day: str) -> list[str]:
     return days
 
 
-def _validate_building_resume(report: dict, last_price_day: date, first_day: date) -> None:
+def _observed_action_resume_proof(conn, report, last_price_day, first_day):
+    """Read retained source certification after pre-publication invalidation.
+
+    This is permission to resume a fenced rebuild, never a replacement for
+    total-return certification. The contract stays BUILDING throughout.
+    """
+    if report.get('quality_run_id') is not None:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT c.metadata->>'invalidated_reason', q.run_id,
+                   q.status, q.mode, q.target_date
+            FROM price_return_contract c
+            JOIN dq_run q ON q.run_id::text=c.metadata->>'invalidated_by_run_id'
+            WHERE c.source='KRX' AND c.asset_type='stock'
+              AND c.field_name='total_return_close'
+              AND c.status='BUILDING' AND c.quality_run_id IS NULL
+        """)
+        row = cur.fetchone()
+    return bool(row and row[0] == (
+        'DART_BRONZE_ACTION_CHANGE_OBSERVED_BEFORE_PUBLICATION:' + first_day.isoformat()
+    ) and row[1] and row[2] == 'CERTIFIED' and row[3] == 'daily'
+        and row[4] == last_price_day)
+
+
+def _validate_building_resume(report: dict, last_price_day: date, first_day: date,
+                              *, observed_action_proof: bool = False) -> None:
     """A deferred return horizon may lag raw prices, never lead them.
 
     Silver publication demotes the label to BUILDING without advancing its
@@ -43,9 +69,11 @@ def _validate_building_resume(report: dict, last_price_day: date, first_day: dat
             and report.get("last_certified_trade") == last_price_day.isoformat()
             and report.get("methodology_version") == freshness.KRX_TOTAL_RETURN_METHODOLOGY
             and report.get("contract_release") == freshness.CONTRACT_RELEASE
-            and report.get("dq_status") == "CERTIFIED"
-            and report.get("dq_mode") in {"daily", "krx_total_return_rebuild"}
-            and bool(report.get("quality_run_id"))
+            and ((report.get("dq_status") == "CERTIFIED"
+                  and report.get("dq_mode") in {"daily", "krx_total_return_rebuild"}
+                  and bool(report.get("quality_run_id")))
+                 or (observed_action_proof and report.get('quality_run_id') is None
+                     and report.get('dq_status') is None and report.get('dq_mode') is None))
         )
     except (KeyError, TypeError, ValueError):
         valid = False
@@ -98,7 +126,11 @@ def run(
                 )
             )
             first_replay_day = datetime.strptime(days[0], "%Y%m%d").date()
-            _validate_building_resume(report, last_price_day, first_replay_day)
+            proof = _observed_action_resume_proof(
+                lock, report, last_price_day, first_replay_day,
+            )
+            _validate_building_resume(report, last_price_day, first_replay_day,
+                                      observed_action_proof=proof)
             print(
                 "[gap-replay] resuming fenced BUILDING contract "
                 f"coverage_end={last_price_day.isoformat()}",
