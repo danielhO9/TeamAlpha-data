@@ -65,6 +65,7 @@ def run(
     resume_building: bool = False,
     defer_followups: bool = False,
     followup_from_day: str | None = None,
+    gold_from_day: str | None = None,
 ) -> None:
     """Replay weekdays sequentially and certify total return on the last day.
 
@@ -73,6 +74,8 @@ def run(
     partition until the final rebuild, audit, and freshness check complete.
     """
     days = _weekdays(from_day, to_day)
+    if gold_from_day and (not defer_followups or gold_from_day > from_day):
+        raise ValueError('Gold start requires deferred mode and cannot follow core start')
     if followup_from_day and (not defer_followups or followup_from_day > from_day):
         raise ValueError('followup start requires deferred mode and cannot follow core start')
     today_kst = datetime.now(daily_full.KST).date()
@@ -127,7 +130,8 @@ def run(
             )
             print(f"[gap-replay] complete day={day}", flush=True)
         if defer_followups:
-            _finish_followups(lock, days, followup_from_day or from_day)
+            _finish_followups(lock, days, followup_from_day or from_day,
+                              gold_from_day or from_day)
     finally:
         if previous_override is None:
             os.environ.pop("PIPELINE_DATE", None)
@@ -136,7 +140,7 @@ def run(
         dart_silver_backfill_ecs.release_daily_certification_lock(lock)
 
 
-def _finish_followups(lock, days, followup_from_day):
+def _finish_followups(lock, days, followup_from_day, gold_from_day=None):
     if not dart_silver_backfill_ecs.total_return_contract_ready(conn=lock):
         raise RuntimeError('core total-return closure must pass before followups')
     followup_days = _weekdays(followup_from_day, days[-1])
@@ -144,7 +148,7 @@ def _finish_followups(lock, days, followup_from_day):
         daily_full.alternative_data_incremental.run(day, conn=lock)
     daily_full.kis_flows.daily(days[-1], conn=lock)
     daily_full.gold_run.run_approved_range(
-        lock, start_date=datetime.strptime(days[0], '%Y%m%d').date(),
+        lock, start_date=datetime.strptime(gold_from_day or days[0], '%Y%m%d').date(),
         end_date=datetime.strptime(days[-1], '%Y%m%d').date(), apply=True)
     for day in followup_days:
         daily_full._run_fmp_incremental(os.environ['S3_BRONZE_BUCKET'], Path('/app/data'),
@@ -160,6 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-building", action="store_true")
     parser.add_argument('--defer-followups', action='store_true')
     parser.add_argument('--followup-from', dest='followup_from_day')
+    parser.add_argument('--gold-from', dest='gold_from_day')
     return parser.parse_args()
 
 
@@ -171,6 +176,7 @@ def main() -> None:
         resume_building=args.resume_building,
         defer_followups=args.defer_followups,
         followup_from_day=args.followup_from_day,
+        gold_from_day=args.gold_from_day,
     )
 
 

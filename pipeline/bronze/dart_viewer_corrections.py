@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Iterable
@@ -893,11 +893,12 @@ def _incremental_manifest_seed(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
         previous_end = date.fromisoformat(str(payload["seed_coverage_end"]))
+        previous_start = date.fromisoformat(str(payload["seed_coverage_start"]))
         compatible = (
             raw == canonical
             and payload.get("schema_version") == SCHEMA_VERSION
             and payload.get("source_contract") == SOURCE_CONTRACT
-            and payload.get("seed_coverage_start") == coverage_start.isoformat()
+            and previous_start <= coverage_start <= previous_end
             and previous_end < coverage_end
             and payload.get("complete") is True
         )
@@ -1223,10 +1224,29 @@ def collect_viewer_corrections(
         coverage_start=coverage_start,
         coverage_end=coverage_end,
     ))
-    reusable_probes = [
-        probe for probe in reused_probes
-        if probe.receipt_no in current_outside
-    ]
+    # Selection is range-dependent even though the stored selector body is
+    # immutable. Re-evaluate both entering and leaving seed families rather
+    # than carrying forward yesterday's selected_dependency flags.
+    seed_cash_receipts = _seed_cash_receipts(
+        disclosures, coverage_start=coverage_start, coverage_end=coverage_end,
+    )
+    reusable_probes = []
+    for probe in reused_probes:
+        if probe.receipt_no not in current_outside:
+            continue
+        lineage = set(probe.family_receipt_nos)
+        if probe.current_selector == "FAMILY":
+            lineage.add(probe.receipt_no)
+        selected = bool(lineage.intersection(seed_cash_receipts))
+        reusable_probes.append(replace(
+            probe, intersects_seed_receipt=selected,
+            selected_dependency=selected,
+        ))
+    print(
+        f"[dart-viewer-corrections] probes reused={len(reusable_probes)} "
+        f"pending={len(current_outside) - len(reusable_probes)}",
+        flush=True,
+    )
     known_probe_receipts = {probe.receipt_no for probe in reusable_probes}
     prefetched_main, new_dependency_probes = _discover_outside_family_dependencies(
         root,

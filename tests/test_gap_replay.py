@@ -101,7 +101,7 @@ def test_batched_gap_defers_followups_but_keeps_final_return_closure(monkeypatch
     assert len(calls)==2
     assert all(c['run_followups'] is False and not c['collect_alternative'] and not c['assert_final_freshness'] for c in calls)
     assert [c['close_total_return'] for c in calls]==[False,True]
-    assert tail==[(lock,['20261009','20261012'],'20261008')]
+    assert tail==[(lock,['20261009','20261012'],'20261008','20261009')]
 
 
 def test_batched_followups_recover_alternative_days_and_fmp_before_final_freshness(monkeypatch):
@@ -112,7 +112,7 @@ def test_batched_followups_recover_alternative_days_and_fmp_before_final_freshne
     monkeypatch.setattr(gap_replay.daily_full.gold_run,'run_approved_range',lambda c,**kw:events.append(('gold',kw)))
     monkeypatch.setattr(gap_replay.daily_full,'_run_fmp_incremental',lambda b,r,d,**kw:events.append(('fmp',d)))
     monkeypatch.setattr(gap_replay.freshness,'assert_fresh',lambda:events.append(('fresh',None)) or {})
-    gap_replay._finish_followups(lock,['20261009','20261012'],'20261008')
+    gap_replay._finish_followups(lock,['20261012'],'20261008','20261009')
     assert events[:3]==[('alternative',d) for d in ['20261008','20261009','20261012']]
     assert events[3]==('kis','20261012')
     assert events[4][1]['start_date']==date(2026,10,9)

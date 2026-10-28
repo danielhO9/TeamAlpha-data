@@ -685,8 +685,9 @@ def _evidence(receipt, classification, *, family, amount=150.0, record=None):
     )
 
 
+@pytest.mark.parametrize("next_start", [date(2015, 1, 1), date(2015, 1, 2)])
 def test_incremental_manifest_seed_reuses_old_evidence_and_returns_delta(
-    tmp_path,
+    tmp_path, next_start,
 ):
     old_receipt = "20250102000001"
     new_receipt = "20250103000002"
@@ -712,7 +713,7 @@ def test_incremental_manifest_seed_reuses_old_evidence_and_returns_delta(
 
     reused, probes, delta = viewer._incremental_manifest_seed(
         tmp_path,
-        coverage_start=date(2015, 1, 1),
+        coverage_start=next_start,
         coverage_end=date(2025, 1, 3),
         ordered_seeds=(old_receipt, new_receipt),
     )
@@ -720,6 +721,57 @@ def test_incremental_manifest_seed_reuses_old_evidence_and_returns_delta(
     assert reused == [evidence]
     assert probes == []
     assert delta == {new_receipt}
+
+
+def test_rolling_scope_reclassifies_cached_probes_without_refetch(tmp_path, monkeypatch):
+    old_root, new_root = "20260715000001", "20260811000001"
+    old_fix, new_fix = "20260812000001", "20260812000002"
+    rows = [
+        {"rcept_no": receipt, "stock_code": "000660",
+         "report_nm": ("[기재정정]" if receipt in {old_fix, new_fix} else "")
+         + "현금ㆍ현물배당결정"}
+        for receipt in (old_root, new_root, old_fix, new_fix)
+    ]
+    _write_disclosures(tmp_path, rows, start="20260701", end="20260812")
+    families = {old_fix: (old_fix, old_root), new_fix: (new_fix, new_root)}
+    calls = []
+
+    def fetch(url, **kwargs):
+        parsed = urlparse(url)
+        receipt = parse_qs(parsed.query)["rcpNo"][0]
+        calls.append((parsed.path, receipt))
+        if parsed.path.endswith("/main.do"):
+            options = "".join(
+                f'<option value="rcpNo={member}"'
+                f'{" selected" if member == receipt else ""}>{member}</option>'
+                for member in families[receipt]
+            )
+            return (
+                f'<script>viewDoc("{receipt}", "1234567", "0", "0", "0", '
+                f'"HTML", "");</script><select id="family">{options}</select>'
+                '<select id="att"></select>'
+            ).encode()
+        return _economic_viewer(amount="325", record_date="2026-12-31")
+
+    monkeypatch.setattr(viewer, "_get", fetch)
+    first = _collect(str(tmp_path), coverage_start=date(2026, 7, 1),
+                     coverage_end=date(2026, 8, 10), apply=True, workers=1)
+    assert [row.receipt_no for row in first.receipts] == [old_fix]
+    calls.clear()
+    second = _collect(str(tmp_path), coverage_start=date(2026, 7, 16),
+                      coverage_end=date(2026, 8, 11), apply=True, workers=1)
+    assert [row.receipt_no for row in second.receipts] == [new_fix]
+    # Only the newly selected economic dependency needs a fetch; unrelated
+    # historical probes are reused and verified against their stored hashes.
+    assert all(receipt == new_fix for _, receipt in calls)
+    assert len(second.dependency_probes) == 2
+    _verify(str(tmp_path), required_start=date(2026, 7, 16),
+            required_end=date(2026, 8, 11))
+    probe_path = tmp_path / second.dependency_probes[0].main_path
+    probe_path.write_bytes(b"corrupted")
+    with pytest.raises(RuntimeError, match="body changed"):
+        _verify(str(tmp_path), required_start=date(2026, 7, 16),
+                required_end=date(2026, 8, 11))
 
 
 def test_official_family_allows_incomplete_intermediate_when_terminal_complete():
