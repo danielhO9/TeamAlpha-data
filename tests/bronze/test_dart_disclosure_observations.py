@@ -61,8 +61,27 @@ def test_correction_order_report_marker_is_conditionally_mutable(tmp_path):
     assert canonical["20260826000752"] == (str(new_path), current)
     assert audit["mutable_conflict_field_counts"] == {"report_nm": 1}
     assert audit["conditional_mutable_fields"] == {
-        "report_nm": "leading_[정정명령부과]_display_marker_only",
+        "report_nm": "leading_[정정명령부과|첨부추가]_display_markers_only",
     }
+
+
+def test_attachment_addition_retains_raw_title_and_audit(tmp_path):
+    original = {"rcept_no": "20261006000420", "corp_code": "00989619",
+                "stock_code": "196170", "report_nm": "주요사항보고서(회사합병결정)"}
+    current = {**original, "report_nm": "[첨부추가]주요사항보고서(회사합병결정)"}
+    old = tmp_path / "from=20260922" / "to=20261006" / "disclosures_v3.json"
+    new = tmp_path / "from=20260924" / "to=20261008" / "disclosures_v3.json"
+    assert immutable_disclosure_changes(original, current) == ()
+    canonical, audit = canonicalize_disclosures([(old, original), (new, current)])
+    assert canonical[original["rcept_no"]] == (str(new), current)
+    assert audit["mutable_conflict_field_counts"] == {"report_nm": 1}
+    changed = {**current, "report_nm": "[첨부추가]주요사항보고서(유상증자결정)"}
+    assert immutable_disclosure_changes(original, changed) == ("report_nm",)
+    with pytest.raises(RuntimeError, match="conflicting immutable"):
+        canonicalize_disclosures([(old, original), (new, changed)])
+    # A correction of the attachment itself is deliberately not whitelisted.
+    corrected = {**original, "report_nm": "[첨부정정]" + original["report_nm"]}
+    assert immutable_disclosure_changes(original, corrected) == ("report_nm",)
 
 
 def test_report_semantics_change_remains_blocked():

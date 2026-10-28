@@ -21,11 +21,15 @@ from typing import Iterable
 _MUTABLE_LIST_FIELDS = frozenset({"corp_cls", "corp_name", "flr_nm", "rm"})
 _RECEIPT_PATTERN = re.compile(r"^[0-9]{14}$")
 _INTERVAL_PATTERN = re.compile(r"^[0-9]{8}$")
-_REPORT_STATUS_PREFIX = re.compile(r"^(?:\[정정명령부과\]\s*)+")
+_REPORT_STATUS_PREFIX = re.compile(r"^(?:\[(?:정정명령부과|첨부추가)\]\s*)+")
 
 
 def _immutable_comparison_value(field: str, value: object) -> object:
-    """Ignore only DART's retrospective correction-order display marker."""
+    """Ignore only observed status prefixes; preserve the underlying report title.
+
+    Attachment additions do not change receipt identity. The selected raw title
+    and all observations remain preserved and audited, not rewritten.
+    """
     if field == "report_nm" and isinstance(value, str):
         return _REPORT_STATUS_PREFIX.sub("", value)
     return value
@@ -201,7 +205,7 @@ def canonicalize_disclosures(
         "contract": "latest_manifest_interval_mutable_list_fields_v3",
         "mutable_fields": sorted(_MUTABLE_LIST_FIELDS),
         "conditional_mutable_fields": {
-            "report_nm": "leading_[정정명령부과]_display_marker_only",
+            "report_nm": "leading_[정정명령부과|첨부추가]_display_markers_only",
         },
         "observation_count": observation_count,
         "unique_receipt_count": len(canonical),
