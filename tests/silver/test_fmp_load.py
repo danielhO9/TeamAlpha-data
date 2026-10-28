@@ -6,6 +6,7 @@ from pipeline.silver.fmp_load import (
     _build_daily_candidates,
     _existing_identifier_map,
     _fundamental_partitions,
+    _exclude_stored_security_id_conflicts,
 )
 from pipeline.silver_quality.models import CandidateBundle
 
@@ -25,6 +26,22 @@ class _Cursor:
 
     def fetchall(self):
         return self._rows
+
+
+def test_stored_security_conflict_omits_only_optional_link():
+    ids=pd.DataFrame([
+        dict(natural_key='FMP:NEW',source='FMP',identifier_type='ticker',identifier='NEW',valid_to=None),
+        dict(natural_key='FMP:NEW',source='FMP',identifier_type='cusip',identifier='STALE',valid_to=None),
+        dict(natural_key='FMP:NEW',source='FMP',identifier_type='isin',identifier='GOOD',valid_to=None),
+        dict(natural_key='FMP:OLD',source='FMP',identifier_type='cusip',identifier='STALE',valid_to=None),
+    ])
+    bundle=CandidateBundle(identifiers=ids,prices=pd.DataFrame([{'close':100}]))
+    conn=_Connection([('ticker','NEW',2),('ticker','OLD',1),('cusip','STALE',1)])
+    _exclude_stored_security_id_conflicts(conn,bundle)
+    assert len(bundle.identifiers)==3
+    assert len(bundle.prices)==1
+    assert bundle.stats['universe']['ambiguous_identifier_rows_removed']==1
+    assert bundle.stats['universe']['ambiguous_identifier_samples'][0]['stored_asset_id']==1
 
 
 class _Connection:

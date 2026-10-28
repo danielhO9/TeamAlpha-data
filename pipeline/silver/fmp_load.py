@@ -212,6 +212,43 @@ def _add_previous_commodity_roll_check(conn, bundle: CandidateBundle) -> None:
     detail["samples"] = samples[:20]
 
 
+def _exclude_stored_security_id_conflicts(conn, bundle):
+    """Do not attach stale optional security IDs to a different ticker asset.
+
+    This extends the existing within-batch ambiguous CUSIP/ISIN exclusion to
+    persisted mappings. Prices/assets remain ticker-anchored; stored mappings
+    and Bronze are untouched. All omissions enter the existing DQ audit.
+    """
+    ids = bundle.identifiers
+    if ids.empty:
+        return
+    with conn.cursor() as cur:
+        cur.execute("""SELECT identifier_type,identifier,asset_id
+            FROM asset_identifier WHERE source='FMP' AND valid_to IS NULL
+            AND identifier_type IN ('ticker','cusip','isin')""")
+        stored = {(kind, str(value)): aid for kind, value, aid in cur.fetchall()}
+    removed, samples = [], []
+    for index, row in ids.iterrows():
+        if (row['source'] != 'FMP' or row['identifier_type'] not in ('cusip','isin')
+                or not pd.isna(row['valid_to'])):
+            continue
+        owner = stored.get((row['identifier_type'], str(row['identifier'])))
+        primary = str(row['natural_key']).removeprefix('FMP:')
+        if owner is not None and owner != stored.get(('ticker', primary)):
+            removed.append(index)
+            samples.append({'natural_key':str(row['natural_key']),
+                            'identifier_type':str(row['identifier_type']),
+                            'identifier':str(row['identifier']),
+                            'stored_asset_id':owner,
+                            'reason':'CONFLICT_WITH_STORED_SECURITY_ID'})
+    if removed:
+        bundle.identifiers = ids.drop(index=removed).reset_index(drop=True)
+        stats = bundle.stats.setdefault('universe', {})
+        stats['ambiguous_identifier_rows_removed'] = stats.get('ambiguous_identifier_rows_removed',0)+len(removed)
+        stats['ambiguous_identifier_samples'] = (samples+stats.get('ambiguous_identifier_samples',[]))[:20]
+        print(f'[fmp] excluded {len(removed)} conflicting optional security identifiers; retained ticker facts', flush=True)
+
+
 def _build_daily_candidates(
     conn,
     base: str,
@@ -225,6 +262,7 @@ def _build_daily_candidates(
     """
     bundle = fmp.build_candidates(base, target_date)
     with conn.transaction():
+        _exclude_stored_security_id_conflicts(conn, bundle)
         _add_previous_commodity_roll_check(conn, bundle)
         bundle.stats.setdefault("price_daily", {})["coverage_baseline"] = (
             repository.recent_source_daily_count_baseline(conn, "FMP", target_date)

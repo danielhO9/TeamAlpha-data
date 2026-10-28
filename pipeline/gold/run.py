@@ -256,7 +256,15 @@ def run_approved_daily(
     Silver task ship the execution path before a human promotion decision,
     while the database status remains the publication authority.
     """
-    target = _parse_date(as_of_date)
+    return run_approved_range(conn, start_date=as_of_date, end_date=as_of_date, apply=apply)
+
+
+def run_approved_range(conn, *, start_date, end_date, apply):
+    """Replace only a bounded missing range; share the legacy panel once."""
+    first = _parse_date(start_date)
+    target = _parse_date(end_date)
+    if first > target:
+        raise ValueError('reversed Gold range')
     manifest = load_manifest()
     from pipeline.gold.bulk_daily import LEGACY_FACTOR_KEYS, run_bulk
 
@@ -301,7 +309,7 @@ def run_approved_daily(
         affected = run_factor(
             conn,
             factor_key=factor_key,
-            start_date=target,
+            start_date=first,
             end_date=target,
             apply=apply,
         )
@@ -317,7 +325,7 @@ def run_approved_daily(
     # once per factor.
     if isinstance(legacy_ready, int) and legacy_ready == len(LEGACY_FACTOR_KEYS):
         affected = run_bulk(
-            conn, start_date=target, end_date=target, apply=apply
+            conn, start_date=first, end_date=target, apply=apply
         )
         results["legacy_daily_bulk"] = affected
         mode = "APPLY" if apply else "DRY-RUN/ROLLBACK"

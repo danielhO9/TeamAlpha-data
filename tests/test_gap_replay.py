@@ -90,6 +90,37 @@ def test_gap_replay_holds_one_epoch_and_only_certifies_final_day(monkeypatch):
     assert os.environ["PIPELINE_DATE"] == "original"
 
 
+def test_batched_gap_defers_followups_but_keeps_final_return_closure(monkeypatch):
+    lock=object(); calls=[]; tail=[]
+    monkeypatch.setattr(gap_replay.dart_silver_backfill_ecs,'acquire_daily_certification_lock',lambda:lock)
+    monkeypatch.setattr(gap_replay.dart_silver_backfill_ecs,'release_daily_certification_lock',lambda c:None)
+    monkeypatch.setattr(gap_replay.dart_silver_backfill_ecs,'total_return_contract_ready',lambda **k:True)
+    monkeypatch.setattr(gap_replay.daily_full,'_main_locked',lambda c,**kw:calls.append(kw))
+    monkeypatch.setattr(gap_replay,'_finish_followups',lambda *a:tail.append(a))
+    gap_replay.run('20261009','20261012',defer_followups=True,followup_from_day='20261008')
+    assert len(calls)==2
+    assert all(c['run_followups'] is False and not c['collect_alternative'] and not c['assert_final_freshness'] for c in calls)
+    assert [c['close_total_return'] for c in calls]==[False,True]
+    assert tail==[(lock,['20261009','20261012'],'20261008')]
+
+
+def test_batched_followups_recover_alternative_days_and_fmp_before_final_freshness(monkeypatch):
+    events=[];lock=object();monkeypatch.setenv('S3_BRONZE_BUCKET','bronze')
+    monkeypatch.setattr(gap_replay.dart_silver_backfill_ecs,'total_return_contract_ready',lambda **kw:True)
+    monkeypatch.setattr(gap_replay.daily_full.alternative_data_incremental,'run',lambda d,**kw:events.append(('alternative',d)))
+    monkeypatch.setattr(gap_replay.daily_full.kis_flows,'daily',lambda d,**kw:events.append(('kis',d)))
+    monkeypatch.setattr(gap_replay.daily_full.gold_run,'run_approved_range',lambda c,**kw:events.append(('gold',kw)))
+    monkeypatch.setattr(gap_replay.daily_full,'_run_fmp_incremental',lambda b,r,d,**kw:events.append(('fmp',d)))
+    monkeypatch.setattr(gap_replay.freshness,'assert_fresh',lambda:events.append(('fresh',None)) or {})
+    gap_replay._finish_followups(lock,['20261009','20261012'],'20261008')
+    assert events[:3]==[('alternative',d) for d in ['20261008','20261009','20261012']]
+    assert events[3]==('kis','20261012')
+    assert events[4][1]['start_date']==date(2026,10,9)
+    assert events[4][1]['end_date']==date(2026,10,12)
+    assert events[5:8]==[('fmp',d) for d in ['20261008','20261009','20261012']]
+    assert events[-1][0]=='fresh'
+
+
 def test_gap_replay_refuses_unhealthy_entry_contract(monkeypatch):
     lock = object()
     released: list[object] = []

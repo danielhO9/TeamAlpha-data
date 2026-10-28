@@ -193,6 +193,7 @@ def _main_locked(
     full_year_financial_snapshot: bool = False,
     bounded_action_scope: bool = False,
     collect_alternative: bool = True,
+    run_followups: bool = True,
 ) -> None:
     """Run one target day while the caller owns the certification epoch.
 
@@ -203,6 +204,8 @@ def _main_locked(
     behavior through an environment variable or CLI flag.
     """
     bucket = os.environ["S3_BRONZE_BUCKET"]
+    if not run_followups and (not allow_deferred_total_return or assert_final_freshness):
+        raise ValueError('followups may only be deferred inside a fenced gap replay')
     day = _target_day()
     ds = ymd_to_dash(day)
     coverage_end = datetime.strptime(day, "%Y%m%d").date()
@@ -248,6 +251,8 @@ def _main_locked(
         )
         if collect_alternative:
             alternative_data_incremental.run(day, conn=certification_lock)
+        if not run_followups:
+            return
         kis_flows.daily(day, conn=certification_lock)
         gold_run.run_approved_daily(
             certification_lock, as_of_date=coverage_end, apply=True,
@@ -286,6 +291,8 @@ def _main_locked(
         if collect_alternative:
             assert_epoch()
             alternative_data_incremental.run(day, conn=certification_lock)
+        if not run_followups:
+            return
         kis_flows.daily(day, conn=certification_lock)
         gold_run.run_approved_daily(
             certification_lock, as_of_date=coverage_end, apply=True,
@@ -648,6 +655,9 @@ def _main_locked(
         assert_epoch()
         alternative_data_incremental.run(day, conn=certification_lock)
 
+    if not run_followups:
+        print(f'[gap-replay] followups deferred day={day}', flush=True)
+        return
     kis_flows.daily(day, conn=certification_lock)
 
     # Gold replaces only this closed KRX date.  Historical source rows remain
