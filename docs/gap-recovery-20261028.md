@@ -35,3 +35,13 @@ The same commit adds bounded batched followups to gap replay: core dates first, 
 - Command: `python -m pipeline.gap_replay --from 20261009 --to 20261027 --resume-building --defer-followups --followup-from 20261008`.
 
 ECS RUNNING and shared-lock acquisition were verified. Logs confirm resuming the BUILDING contract at October 8 and starting October 9. October 9 is a KRX holiday but remains a calendar processing target for other inputs. Final certification is still pending; do not repeat completed October 8 Gold or launch a competing replay. If only a followup fails after core completion, recover that unfinished stage rather than replaying completed core/Gold.
+
+## Rolling evidence cache repair
+
+At the user's request, task `692b6f106a744b17b158334bb71b54ce` was stopped deliberately (ECS STOPPED, exit 143) to remove repeated DART dependency discovery. Each calendar replay moved the 180-day start, invalidating the old same-start reuse condition. October 20 took about 62 minutes: about 47 minutes for evidence preparation and 14 minutes for Silver publication/validation.
+
+Commit `51e33ba653a6d1a9bc8edaf80e9e0f290ea2670c` allows reuse for overlapping forward-moving ranges. Cached dependency selector evidence is reclassified against the new seed set, including dependencies entering/leaving the range; new candidates are still fetched. Content-addressed body and final provenance validation remain required. Tests cover the moving-window transition, newly selected dependencies and corrupted cached evidence. Full suite: 1,189 passed.
+
+Read-only RDS checks after stopping confirmed core daily CERTIFIED through October 20 and all 49 APPROVED Gold factors through October 8. A separate `--gold-from` argument prevents losing deferred Gold dates when core replay resumes from October 21. Intended remaining range: core October 21–27, Gold October 9–27, other deferred followups from October 8. October 27 is the latest completed calendar day at the October 28 KST request. No completion claim is made before final certification.
+
+CI and deployment passed; scheduler definition is `teamalpha-data-daily-full:283`. Restarted with `teamalpha-data-gap-recovery:3`, task `625b7c9e21814a6a8fed3a2dcc807aa7`, immutable image `sha256:1f732846805ff341b0b0e79c8f7dec0e38dcddbb5ecf606b7e9681eb2adff137`. Arguments: `--from 20261021 --to 20261027 --resume-building --defer-followups --followup-from 20261008 --gold-from 20261009`. No competing RUNNING task was present at launch; ECS accepted without failures. Existing EFS evidence remains mounted. Confirm actual probe reuse and final layer certification from subsequent logs/DB, not from launch success.
