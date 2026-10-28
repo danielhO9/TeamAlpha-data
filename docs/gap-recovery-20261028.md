@@ -53,3 +53,17 @@ Task `625b7c9e21814a6a8fed3a2dcc807aa7` exited 1 before collection. The restart 
 Commit `6f0935db2182aa6de3492539f5099b7192af96e3` accepts this exact retained source proof for restart only: the invalidation date must equal the first resumed date, the retained run must be CERTIFIED daily at the last certified raw-price date, and all existing coverage, methodology and no-gap checks still apply. The contract remains BUILDING, with no fabricated quality ID or readiness flag. Targeted restart tests: 27 passed, including rejection of wrong reason, missing run, failed run, wrong mode and wrong date. The read-only production proof check passed.
 
 CI test/deploy succeeded. Recovery definition `teamalpha-data-gap-recovery:4`, task `c97a142a1e07487aa509a16c5cc75c3e`, image `sha256:9eb735f75b64e76de7d1a9d71f2ee7f9abedbae17e824a0d05180ffc30cff5df` was launched with the same October 21–27 core and October 9–27 Gold ranges. No competing task was present. Final certification is pending.
+
+## Observed speed and outstanding interrupted input
+
+Subsequent production logs confirm October 22, 23 and 26 completed in about 29 minutes each, versus about 62 minutes previously. Probe reuse counts were 1,678/1,684 with only 6/0/1 new candidates. October 26 Silver is CERTIFIED; October 27 final evidence preparation reused 170,487 cache objects and downloaded 574 changed objects. This does not certify the final TR/KIS/Gold/FMP stages.
+
+Read-only investigation confirmed an interrupted-input omission: stock 071950 (asset 4569, corp 00210856, 코아스), amended half-year filing `20261021000109`, exists in Bronze but June 30 fundamentals in RDS still contain only filing `20260812000288` (28 rows). The previous task fetched it before interruption; retry returned changed=0 and therefore omitted it from the Silver input list. Repair this exact input under the shared certification lock, retain quality gates, and account for affected Gold dates before claiming completion. Do not run the whole-year/backfill_s3 path (which is intended for an empty target).
+
+Verified source keys and SHA256 at inspection:
+
+- `financials/dart/year=2026/corp=071950/11012.json`: `1ac5d44b4d725c54da1d8fc1fdca003401b9b1e064dd0c4e3dbc6df78ffbac55` (15,547 bytes).
+- `dividends/dart/alot-matter/year=2026/report=11012/corp=071950/rcept=20261021000109/response.json`: `90b52d33843588ebb4edb27683410567012087b80456972629b688f37b98d5d6` (3,145 bytes).
+- Same receipt `manifest.json`: `ba652e1c6856294948b45b8871efc9e4fd95f21ac510ca64cfa8af46097adfaf` (605 bytes).
+
+Financial absence is confirmed; independently reconcile dividend metrics before publishing. The active recovery still holds the shared lock, so no concurrent corrective write was made during this inspection.
