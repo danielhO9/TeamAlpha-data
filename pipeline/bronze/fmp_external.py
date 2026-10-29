@@ -132,6 +132,7 @@ def project(body, symbol, start, end, received_at, *, bundle="core"):
         if not isinstance(rows, list):
             raise ValueError("expected array")
         wrapped, dates, issues = [], [], Counter()
+        excluded = []
         fields = COT_FIELDS if spec["kind"] == "cot" else ("open", "high", "low", "close")
         for index, row in enumerate(rows):
             if not isinstance(row, dict) or row.get("symbol") != symbol:
@@ -139,7 +140,8 @@ def project(body, symbol, start, end, received_at, *, bundle="core"):
             fmt = "%Y-%m-%d %H:%M:%S" if spec["kind"] == "cot" else "%Y-%m-%d"
             stamp = datetime.strptime(row["date"], fmt)
             day = stamp.date()
-            if not start <= day <= end:
+            cot_boundary = spec['kind'] == 'cot' and day == end + timedelta(days=1)
+            if not start <= day <= end and not cot_boundary:
                 raise ValueError("date out of range")
             if spec["kind"] == "cot" and row.get("cftcContractMarketCode") != spec["cftc_code"]:
                 raise ValueError("CFTC contract mismatch")
@@ -150,6 +152,13 @@ def project(body, symbol, start, end, received_at, *, bundle="core"):
                     flags.append("null_" + field)
                 elif isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value):
                     raise ValueError("invalid numeric field")
+            if cot_boundary:
+                # FMP COT can include the next day's weekly position in an
+                # inclusive end-date response. Keep the raw receipt intact,
+                # but never project that observation into the earlier range.
+                excluded.append({'source_row_index': index, 'provider_date': row['date'],
+                                 'payload_sha256': sha(encoded(row))})
+                continue
             if day.weekday() >= 5:
                 flags.append("provider_weekend_date")
             if spec["kind"] != "cot" and all(row[k] is not None for k in fields):
@@ -181,8 +190,12 @@ def project(body, symbol, start, end, received_at, *, bundle="core"):
             current = nxt
     except (KeyError, TypeError, ValueError) as exc:
         raise FMPError(f"invalid external data for {symbol}: {exc}") from exc
-    return wrapped, {"row_count": len(rows), "first_date": min(dates, default=None),
-                     "latest_date": max(dates, default=None), "quality_flag_counts": dict(issues)}
+    stats = {"row_count": len(wrapped), "first_date": min(dates, default=None),
+             "latest_date": max(dates, default=None), "quality_flag_counts": dict(issues)}
+    if excluded:
+        stats.update(provider_row_count=len(rows), excluded_cot_boundary_rows=excluded,
+                     excluded_cot_boundary_count=len(excluded))
+    return wrapped, stats
 
 
 def partition(client, root, symbol, start, end, snapshot, cache_root, *, bundle="core"):

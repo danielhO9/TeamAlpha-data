@@ -87,6 +87,21 @@ def test_cot_contract_identity_and_monday_date():
         m.project(json.dumps([r]).encode(), "HG", START, END, RECEIVED)
 
 
+def test_cot_next_day_boundary_is_audited_without_future_projection():
+    rows = [row('HG', '2015-02-02'), row('HG', '2015-03-01')]
+    projected, stats = m.project(json.dumps(rows).encode(), 'HG', START, END, RECEIVED)
+    assert len(projected) == stats['row_count'] == 1
+    assert stats['provider_row_count'] == 2
+    assert stats['excluded_cot_boundary_count'] == 1
+    assert stats['excluded_cot_boundary_rows'][0]['source_row_index'] == 1
+    assert projected[0]['observation_date'] == '2015-02-02'
+    rows[1]['cftcContractMarketCode'] = 'WRONG'
+    with pytest.raises(FMPError, match='contract mismatch'):
+        m.project(json.dumps(rows).encode(), 'HG', START, END, RECEIVED)
+    with pytest.raises(FMPError, match='date out of range'):
+        m.project(json.dumps([row('HG', '2015-03-02')]).encode(), 'HG', START, END, RECEIVED)
+
+
 def test_raw_byte_evidence_idempotence_and_cache_promotion(tmp_path, monkeypatch):
     src, dst = tmp_path / "src", tmp_path / "dst"
     c = Client()
