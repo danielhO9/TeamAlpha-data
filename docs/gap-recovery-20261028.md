@@ -67,3 +67,9 @@ Verified source keys and SHA256 at inspection:
 - Same receipt `manifest.json`: `ba652e1c6856294948b45b8871efc9e4fd95f21ac510ca64cfa8af46097adfaf` (605 bytes).
 
 Financial absence is confirmed; independently reconcile dividend metrics before publishing. The active recovery still holds the shared lock, so no concurrent corrective write was made during this inspection.
+
+## October 29 FMP tail repair
+
+Task `c97a142a1e07487aa509a16c5cc75c3e` is no longer returned by ECS; no exit code is inferred. Its final log records FMP external HG `date out of range` during calendar October 13. Stored raw request June 15–October 12 contains 18 COT rows, including October 13; only that next-day row exceeds the requested range. Commit `8f31db62537c92d09c99fbcc322b8e3d0d015f1f` retains raw evidence, validates CFTC identity/numerics and explicitly audits/excludes next-day COT boundary rows from the earlier-range projection. Other out-of-range dates and non-COT series still fail closed. The actual receipt projects 17 rows and audits one excluded row. 70 targeted tests passed.
+
+Read-only RDS confirms core daily and KRX TR CERTIFIED through October 27, all 49 APPROVED Gold factors latest October 27, and FMP CERTIFIED through October 9. Koas amended filing is still absent. `tools/repair_interrupted_filing_20261021.py` passed a real-source dry run: 28 candidate rows, all quality gates passed, earliest availability October 22. Hash/scope/availability rejection tests passed. `tools/recover_remaining_20261029.py` is the scoped tail: shared lock, verified Koas input repair, Gold October 22–27 only (cross-sectional ranks must also be refreshed), then FMP calendar October 13–27, preserving previous completed source ranges. Its durable checkpoint is written only after both Koas Silver and affected Gold complete. Full recovery is not yet certified.
