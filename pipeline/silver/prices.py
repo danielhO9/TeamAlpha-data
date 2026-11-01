@@ -24,6 +24,7 @@ from pipeline.silver.return_contract import (
     invalidate_krx_total_return,
 )
 from pipeline.silver.assets import BENCHMARKS
+from pipeline.silver.reviewed_price_references import apply_reviewed_references
 
 COLS = [
     "asset_id", "source", "trade_date", "open", "high", "low", "close",
@@ -222,7 +223,7 @@ def _read_marcap(
     })
     previous = out["close"] - out["prev_diff"]
     out["fluc_rate"] = out["prev_diff"] / previous.replace(0, np.nan) * 100
-    return out
+    return apply_reviewed_references(out)
 
 
 def _read_krxapi(
@@ -242,7 +243,7 @@ def _read_krxapi(
     if not frames:
         return pd.DataFrame()
     k = pd.concat(frames, ignore_index=True)
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "ticker": k["ISU_CD"].astype(str),
         "trade_date": pd.to_datetime(k["BAS_DD"]).dt.date,
         "open": _num(k["TDD_OPNPRC"]), "high": _num(k["TDD_HGPRC"]),
@@ -254,6 +255,7 @@ def _read_krxapi(
         "market": k["MKT_NM"].astype(str).replace(MARKET_NORM),
         "source_file": k["_source_file"],
     })
+    return apply_reviewed_references(out)
 
 
 def _with_adj_close(df: pd.DataFrame) -> pd.DataFrame:
